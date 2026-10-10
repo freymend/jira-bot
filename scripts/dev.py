@@ -1,0 +1,266 @@
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import TextIO
+from urllib.error import URLError
+from urllib.request import urlopen
+
+from dotenv import dotenv_values
+
+ROOT = Path(__file__).resolve().parents[1]
+ATTENDEE_ROOT = ROOT.parent / "attendee"
+STATE_ROOT = ROOT / ".dev-run"
+STARTUP_TIMEOUT_SECONDS = 600
+
+
+def _setting(name: str, default: str) -> str:
+    value = os.environ.get(name) or dotenv_values(ROOT / ".env").get(name)
+    return str(value) if value else default
+
+
+def _is_ready(url: str) -> bool:
+    try:
+        with urlopen(url, timeout=2) as response:
+            return response.status == 200
+    except (OSError, URLError):
+        return False
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _pid_matches_service(pid: int, name: str) -> bool:
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    command = result.stdout.lower()
+    if name == "gemma":
+        return "vllm" in command and "serve" in command
+    return "uvicorn" in command and "mlx_transcriber.main" in command
+
+
+def _wait_until_ready(name: str, url: str, pid: int, log: TextIO) -> None:
+    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+    print(f"Waiting for {name} at {url}; startup output is in {log.name}.", flush=True)
+    while time.monotonic() < deadline:
+        if _is_ready(url):
+            print(f"{name} is ready.", flush=True)
+            return
+        if not _process_exists(pid):
+            raise RuntimeError(f"{name} exited during startup; see {log.name}")
+        time.sleep(5)
+    raise TimeoutError(f"{name} did not become ready; see {log.name}")
+
+
+def _start_native_service(
+    name: str,
+    command: list[str],
+    cwd: Path,
+    health_url: str,
+) -> None:
+    STATE_ROOT.mkdir(exist_ok=True)
+    pid_file = STATE_ROOT / f"{name}.pid"
+    log_file = STATE_ROOT / f"{name}.log"
+
+    if _is_ready(health_url):
+        print(f"{name} is already running; leaving it unmanaged.")
+        return
+
+    if pid_file.exists():
+        try:
+            existing_pid = int(pid_file.read_text().strip())
+        except ValueError:
+            existing_pid = -1
+        if (
+            existing_pid > 0
+            and _process_exists(existing_pid)
+            and _pid_matches_service(existing_pid, name)
+        ):
+            with log_file.open("a", encoding="utf-8") as log:
+                _wait_until_ready(name, health_url, existing_pid, log)
+            return
+        pid_file.unlink(missing_ok=True)
+
+    with log_file.open("a", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
+    with log_file.open("a", encoding="utf-8") as log:
+        _wait_until_ready(name, health_url, process.pid, log)
+
+
+def _stop_native_services() -> None:
+    for name in ("gemma", "mlx-whisper"):
+        pid_file = STATE_ROOT / f"{name}.pid"
+        if not pid_file.exists():
+            continue
+        try:
+            pid = int(pid_file.read_text().strip())
+        except ValueError:
+            pid = -1
+        if (
+            pid > 0
+            and _process_exists(pid)
+            and _pid_matches_service(pid, name)
+        ):
+            print(f"Stopping managed {name} process ({pid}).")
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pid_file.unlink(missing_ok=True)
+                continue
+            except PermissionError as exc:
+                print(
+                    f"Could not stop {name} process ({pid}): {exc}. "
+                    "Leaving it running and retaining its PID file.",
+                    file=sys.stderr,
+                )
+                continue
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and _process_exists(pid):
+                time.sleep(0.2)
+            if _process_exists(pid):
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError as exc:
+                    print(
+                        f"Could not force-stop {name} process ({pid}): {exc}. "
+                        "Leaving it running and retaining its PID file.",
+                        file=sys.stderr,
+                    )
+                    continue
+        pid_file.unlink(missing_ok=True)
+
+
+def _require_setup() -> None:
+    required_paths = (
+        ROOT / ".env",
+        ATTENDEE_ROOT / "dev.docker-compose.yaml",
+        ATTENDEE_ROOT / ".env",
+    )
+    missing = [str(path) for path in required_paths if not path.exists()]
+    if missing:
+        paths = "\n".join(f"  - {path}" for path in missing)
+        raise RuntimeError(f"Complete the local setup first; missing:\n{paths}")
+
+    for executable in ("docker", "ffmpeg"):
+        if shutil.which(executable) is None:
+            raise RuntimeError(f"Required command is not on PATH: {executable}")
+    if shutil.which("vllm") is None and not _is_ready("http://127.0.0.1:8100/health"):
+        raise RuntimeError(
+            "Activate the vLLM-Metal environment before starting Gemma, or start "
+            "Gemma separately on port 8100."
+        )
+    key = _setting("MLX_TRANSCRIBER_API_KEY", "")
+    if not key or key == "replace-with-a-long-random-token":
+        raise RuntimeError("Set MLX_TRANSCRIBER_API_KEY in the project .env file.")
+
+
+def _compose(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["docker", "compose", *args],
+        cwd=ROOT,
+        check=check,
+        text=True,
+    )
+
+
+def up() -> None:
+    _require_setup()
+    whisper_command = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "mlx_transcriber.main:app",
+        "--env-file",
+        str(ROOT / ".env"),
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8101",
+    ]
+    model = _setting("LLM_MODEL", "mlx-community/gemma-4-e4b-it-4bit")
+    vllm = shutil.which("vllm")
+    try:
+        if vllm is not None:
+            gemma_command = [
+                vllm,
+                "serve",
+                model,
+                "--language-model-only",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8100",
+                "--max-model-len",
+                "16384",
+            ]
+            _start_native_service(
+                "gemma", gemma_command, ROOT, "http://127.0.0.1:8100/health"
+            )
+        _start_native_service(
+            "mlx-whisper",
+            whisper_command,
+            ROOT,
+            "http://127.0.0.1:8101/health",
+        )
+        _compose("up", "--build", "-d")
+    except (OSError, RuntimeError, subprocess.CalledProcessError, TimeoutError):
+        _stop_native_services()
+        raise
+    print("API, Attendee, MLX Whisper, and Gemma are running.")
+    print("Native model logs: .dev-run/mlx-whisper.log and .dev-run/gemma.log")
+
+
+def down() -> None:
+    try:
+        _compose("down", check=False)
+    finally:
+        _stop_native_services()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run the local meeting assistant stack")
+    parser.add_argument("command", choices=("up", "down"))
+    args = parser.parse_args()
+    try:
+        if args.command == "up":
+            up()
+        else:
+            down()
+    except (OSError, RuntimeError, subprocess.CalledProcessError, TimeoutError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        _stop_native_services()
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

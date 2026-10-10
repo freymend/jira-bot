@@ -1,0 +1,5 @@
+services:
+  attendee-worker-local:
+    environment:
+      - CUSTOM_ASYNC_TRANSCRIPTION_URL=http://host.docker.internal:8101/transcribe
+      - CUSTOM_ASYNC_TRANSCRIPTION_TIMEOUT=600

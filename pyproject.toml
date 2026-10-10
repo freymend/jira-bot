@@ -1,0 +1,34 @@
+[project]
+name = "jira-meeting-assistant"
+version = "0.1.0"
+description = "Extract explicit action items from Google Meet transcripts and create Jira issues."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "httpx>=0.27,<1",
+    "openai>=1.50,<3",
+    "pydantic>=2.9,<3",
+    "python-dotenv>=1,<2",
+    "uvicorn[standard]>=0.30,<1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14,<1",
+    "jira-meeting-assistant-mlx-transcriber",
+]
+
+[tool.uv.sources]
+jira-meeting-assistant-mlx-transcriber = { path = "local-transcriber", editable = true }
+
+[tool.uv]
+# This repository is an application; run it from the project environment instead
+# of building and installing a distributable wheel.
+package = false
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

@@ -1,0 +1,30 @@
+include:
+  - path:
+      - ../attendee/dev.docker-compose.yaml
+      - attendee.compose.override.yaml
+    project_directory: ../attendee
+
+services:
+  api:
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_PORT: "5005"
+      DATABASE_PATH: /app/data/jira_bot.sqlite3
+      ATTENDEE_API_BASE: http://attendee-app-local:8000/api/v1
+      LLM_BASE_URL: ${LLM_BASE_URL_DOCKER:-http://host.docker.internal:8100/v1}
+    depends_on:
+      attendee-app-local:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${APP_PORT:-5005}:5005"
+    volumes:
+      - jira_bot_data:/app/data
+    networks:
+      - attendee_network
+
+volumes:
+  jira_bot_data:

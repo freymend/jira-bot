@@ -1,0 +1,18 @@
+[project]
+name = "jira-meeting-assistant-mlx-transcriber"
+version = "0.1.0"
+description = "Local MLX Whisper service for Attendee custom async transcription."
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "mlx-whisper>=0.4.3,<1",
+    "python-multipart>=0.0.20,<1",
+    "uvicorn[standard]>=0.30,<1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mlx_transcriber"]
