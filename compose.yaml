@@ -5,6 +5,48 @@ include:
     project_directory: ../attendee
 
 services:
+  attendee-storage:
+    image: ghcr.io/rustfs/rustfs:1.0.1
+    environment:
+      RUSTFS_ACCESS_KEY: ATTENDEELOCAL
+      RUSTFS_SECRET_KEY: attendee-local-development
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - attendee_storage_data:/data
+    networks:
+      - attendee_network
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  attendee-storage-init:
+    image: docker.io/rustfs/rc:v0.1.36
+    depends_on:
+      attendee-storage:
+        condition: service_healthy
+    environment:
+      RUSTFS_ACCESS_KEY: ATTENDEELOCAL
+      RUSTFS_SECRET_KEY: attendee-local-development
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        /usr/bin/rc alias set local http://attendee-storage:9000
+        "$${RUSTFS_ACCESS_KEY}" "$${RUSTFS_SECRET_KEY}"
+        --region us-east-1 --bucket-lookup path;
+        /usr/bin/rc ls local/attendee-recordings >/dev/null 2>&1 ||
+        /usr/bin/rc bucket create local/attendee-recordings
+    networks:
+      - attendee_network
+
   api:
     build: .
     init: true
@@ -28,3 +70,4 @@ services:
 
 volumes:
   jira_bot_data:
+  attendee_storage_data:

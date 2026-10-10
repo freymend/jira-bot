@@ -18,7 +18,7 @@ The transcript and extracted-task records are stored locally in SQLite at `DATAB
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) for local development.
 - vLLM-Metal installed in its managed native arm64 Python 3.12 environment.
 - The MLX Whisper transcriber runs natively on Apple Silicon with Python 3.14 and `ffmpeg`.
-- The Attendee source checkout at `../attendee`. Its development stack requires AWS recording-storage credentials.
+- The Attendee source checkout at `../attendee`. Recording storage runs in local RustFS; AWS credentials are not needed.
 - An Attendee API key and webhook secret created in the local Attendee instance.
 - A long random `MLX_TRANSCRIBER_API_KEY`, shared by the API and the local transcriber.
 - A public HTTPS URL for Attendee callbacks (for local development, use a tunnel such as ngrok).
@@ -32,7 +32,7 @@ Project dependencies are declared in `pyproject.toml`; `uv.lock` records the res
 
 ## Configure Attendee locally
 
-Attendee's upstream development stack is included in this project's Compose configuration. The API, Attendee API, worker, scheduler, Postgres, and Redis start and stop together. The API reaches Attendee over the Compose network; Attendee's worker sends raw PCM audio to MLX Whisper on the Mac at `host.docker.internal:8101/transcribe`. Gemma uses port `8100`.
+Attendee's upstream development stack is included in this project's Compose configuration. The API, Attendee API, worker, scheduler, Postgres, Redis, and RustFS recording storage start and stop together. The API reaches Attendee over the Compose network; Attendee's worker sends raw PCM audio to MLX Whisper on the Mac at `host.docker.internal:8101/transcribe`. Gemma uses port `8100`.
 
 Clone Attendee next to this repository once, then generate its development environment file:
 
@@ -44,7 +44,7 @@ docker compose run --rm -T attendee-app-local python init_env.py > ../attendee/.
 
 Build the image in a separate step; redirecting the `run` output to a file while the image still has to be built makes Docker's build progress writer fail with `failed to get console: provided file is not a console`.
 
-Fill `../attendee/.env` with the required AWS recording-storage bucket and credentials. The `scripts/dev.py` launcher starts the native model servers and this Compose stack together; start it after configuring the local Gemma environment below.
+No AWS configuration is needed. Compose creates the `attendee-recordings` bucket in RustFS and supplies Attendee with local-only credentials and the RustFS endpoint. The RustFS console is available at `http://localhost:9001` with access key `ATTENDEELOCAL` and secret key `attendee-local-development`. The S3 API is also available at `http://localhost:9000` from the host. Attendee recordings persist in the `attendee_storage_data` Docker volume. The `scripts/dev.py` launcher starts the native model servers and this Compose stack together; start it after configuring the local Gemma environment below.
 
 ## Run the complete local stack
 
@@ -74,9 +74,9 @@ Apply Attendee's migrations, then create its local account:
 docker compose exec attendee-app-local python manage.py migrate
 ```
 
-Create an account at `http://localhost:8000`. Attendee prints the confirmation link in its app logs. After confirming, create an API key and configure the webhook secret in Attendee settings; put those values in this project's `.env` as `ATTENDEE_API_KEY` and `ATTENDEE_WEBHOOK_SECRET`.
+Create an account at `http://localhost:8000`. Attendee prints the confirmation link in its app logs; retrieve it with `docker compose logs attendee-app-local`. After confirming, create an API key and configure the webhook secret in Attendee settings; put those values in this project's `.env` as `ATTENDEE_API_KEY` and `ATTENDEE_WEBHOOK_SECRET`.
 
-The API is available at `http://127.0.0.1:5005`. Point the public HTTPS tunnel at that address for Attendee callbacks. Use `uv run --no-active --group dev python scripts/dev.py down` to stop the Compose stack and the native servers started by the launcher. Its native server logs are in `.dev-run/`. Docker volumes remain between restarts; `docker compose down -v` also deletes the Jira database and Attendee's Postgres data.
+The API is available at `http://127.0.0.1:5005`. Point the public HTTPS tunnel at that address for Attendee callbacks. Use `uv run --no-active --group dev python scripts/dev.py down` to stop the Compose stack and the native servers started by the launcher. Its native server logs are in `.dev-run/`. Docker volumes remain between restarts; `docker compose down -v` also deletes the Jira database, Attendee's Postgres data, and local recording storage.
 
 ## API
 

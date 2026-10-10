@@ -1,5 +1,35 @@
 services:
+  attendee-app-local:
+    environment:
+      AWS_RECORDING_STORAGE_BUCKET_NAME: attendee-recordings
+      AWS_ACCESS_KEY_ID: ATTENDEELOCAL
+      AWS_SECRET_ACCESS_KEY: attendee-local-development
+      AWS_ENDPOINT_URL: http://attendee-storage:9000
+      AWS_S3_ADDRESSING_STYLE: path
+    depends_on:
+      attendee-storage-init:
+        condition: service_completed_successfully
+
   attendee-worker-local:
     environment:
       - CUSTOM_ASYNC_TRANSCRIPTION_URL=http://host.docker.internal:8101/transcribe
       - CUSTOM_ASYNC_TRANSCRIPTION_TIMEOUT=600
+      - AWS_RECORDING_STORAGE_BUCKET_NAME=attendee-recordings
+      - AWS_ACCESS_KEY_ID=ATTENDEELOCAL
+      - AWS_SECRET_ACCESS_KEY=attendee-local-development
+      - AWS_ENDPOINT_URL=http://attendee-storage:9000
+      - AWS_S3_ADDRESSING_STYLE=path
+    depends_on:
+      attendee-storage-init:
+        condition: service_completed_successfully
+
+  attendee-scheduler-local:
+    environment:
+      AWS_RECORDING_STORAGE_BUCKET_NAME: attendee-recordings
+      AWS_ACCESS_KEY_ID: ATTENDEELOCAL
+      AWS_SECRET_ACCESS_KEY: attendee-local-development
+      AWS_ENDPOINT_URL: http://attendee-storage:9000
+      AWS_S3_ADDRESSING_STYLE: path
+    depends_on:
+      attendee-storage-init:
+        condition: service_completed_successfully
