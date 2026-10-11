@@ -5,7 +5,7 @@ import json
 import math
 import re
 from collections import Counter
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import httpx
 from openai import AsyncOpenAI
@@ -554,7 +554,10 @@ def _task_context_packet(
             quote=excerpt,
             timestamp_ms=timestamp_ms,
             speaker_name=segment.get("speaker_name"),
-            source=source if source in {"transcript", "chat"} else "transcript",
+            source=cast(
+                Literal["transcript", "chat"],
+                source if source in {"transcript", "chat"} else "transcript",
+            ),
         )
     anchor_ids = [f"seg-{index:05d}" for index in sorted(anchors)]
     return packet, evidence_by_id, anchor_ids
