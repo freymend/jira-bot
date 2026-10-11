@@ -55,6 +55,15 @@ class Settings:
     jira_issue_type: str
     jira_speaker_account_ids: dict[str, str]
     jira_priority_map: dict[str, str]
+    screenshare_capture_enabled: bool
+    screenshare_websocket_token: str
+    screenshare_resolution: str
+    screenshare_sample_interval_seconds: int
+    screenshare_retention_hours: int
+    screenshare_max_frames_per_meeting: int
+    screenshare_context_window_seconds: int
+    screenshare_vision_enabled: bool
+    jira_attach_screenshare_evidence: bool
     google_calendar_auto_join_enabled: bool
     google_calendar_client_id: str
     google_calendar_client_secret: str
@@ -134,6 +143,38 @@ class Settings:
                     "Google Calendar auto-join is enabled but missing: "
                     + ", ".join(missing_calendar_values)
                 )
+        screenshare_capture_enabled = _bool("SCREENSHARE_CAPTURE_ENABLED", False)
+        screenshare_websocket_token = os.getenv(
+            "SCREENSHARE_WEBSOCKET_TOKEN", ""
+        ).strip()
+        screenshare_resolution = os.getenv("SCREENSHARE_RESOLUTION", "360p").strip()
+        if screenshare_resolution not in {"360p", "720p", "1080p"}:
+            raise RuntimeError("SCREENSHARE_RESOLUTION must be 360p, 720p, or 1080p")
+        screenshare_sample_interval_seconds = int(
+            os.getenv("SCREENSHARE_SAMPLE_INTERVAL_SECONDS", "10")
+        )
+        screenshare_retention_hours = int(
+            os.getenv("SCREENSHARE_RETENTION_HOURS", "24")
+        )
+        screenshare_max_frames_per_meeting = int(
+            os.getenv("SCREENSHARE_MAX_FRAMES_PER_MEETING", "600")
+        )
+        screenshare_context_window_seconds = int(
+            os.getenv("SCREENSHARE_CONTEXT_WINDOW_SECONDS", "30")
+        )
+        if not 1 <= screenshare_sample_interval_seconds <= 60:
+            raise RuntimeError("SCREENSHARE_SAMPLE_INTERVAL_SECONDS must be 1-60")
+        if not 1 <= screenshare_retention_hours <= 8760:
+            raise RuntimeError("SCREENSHARE_RETENTION_HOURS must be 1-8760")
+        if not 1 <= screenshare_max_frames_per_meeting <= 10000:
+            raise RuntimeError("SCREENSHARE_MAX_FRAMES_PER_MEETING must be 1-10000")
+        if not 0 <= screenshare_context_window_seconds <= 300:
+            raise RuntimeError("SCREENSHARE_CONTEXT_WINDOW_SECONDS must be 0-300")
+        if screenshare_capture_enabled and len(screenshare_websocket_token) < 32:
+            raise RuntimeError(
+                "SCREENSHARE_WEBSOCKET_TOKEN must be at least 32 characters "
+                "when screen-share capture is enabled"
+            )
         return cls(
             app_api_token=os.getenv("APP_API_TOKEN", ""),
             app_public_url=os.getenv("APP_PUBLIC_URL", "").rstrip("/"),
@@ -163,6 +204,17 @@ class Settings:
             jira_issue_type=os.getenv("JIRA_ISSUE_TYPE", "Task"),
             jira_speaker_account_ids=_json_mapping("JIRA_SPEAKER_ACCOUNT_IDS"),
             jira_priority_map=_json_mapping("JIRA_PRIORITY_MAP"),
+            screenshare_capture_enabled=screenshare_capture_enabled,
+            screenshare_websocket_token=screenshare_websocket_token,
+            screenshare_resolution=screenshare_resolution,
+            screenshare_sample_interval_seconds=screenshare_sample_interval_seconds,
+            screenshare_retention_hours=screenshare_retention_hours,
+            screenshare_max_frames_per_meeting=screenshare_max_frames_per_meeting,
+            screenshare_context_window_seconds=screenshare_context_window_seconds,
+            screenshare_vision_enabled=_bool("SCREENSHARE_VISION_ENABLED", True),
+            jira_attach_screenshare_evidence=_bool(
+                "JIRA_ATTACH_SCREENSHARE_EVIDENCE", False
+            ),
             google_calendar_auto_join_enabled=calendar_auto_join_enabled,
             google_calendar_client_id=calendar_client_id,
             google_calendar_client_secret=calendar_client_secret,

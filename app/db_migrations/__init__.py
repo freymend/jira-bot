@@ -10,6 +10,7 @@ from .v003_task_evidence_columns import migrate as _add_task_evidence_columns
 from .v004_backfill_finalization_jobs import migrate as _backfill_finalization_jobs
 from .v005_task_extraction_cache import migrate as _create_task_extraction_cache
 from .v006_calendar_auto_join import migrate as _create_calendar_auto_join_requests
+from .v007_screenshare_evidence import migrate as _create_screenshare_evidence
 
 
 def _now() -> str:
@@ -24,6 +25,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (4, _backfill_finalization_jobs),
     (5, _create_task_extraction_cache),
     (6, _create_calendar_auto_join_requests),
+    (7, _create_screenshare_evidence),
 )
 
 

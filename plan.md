@@ -10,11 +10,11 @@ The service joins a manually submitted Google Meet, transcribes audio locally, e
 
 Use relevant shared-screen content to help interpret action items and identify the right Jira task details.
 
-- Investigate what screen capture the meeting integration can provide, including its permissions, timing, and retention behavior.
-- Link any captured frame to the corresponding transcript time so visual context can be reviewed alongside what was said.
-- Define how visual evidence informs task proposals, and make its source visible to reviewers.
-- Add safeguards for sensitive on-screen content, including clear capture controls and a retention policy.
-- Keep audio transcription as the source of spoken commitments; screen content provides context and should not invent an owner or commitment.
+- Use Attendee's per-participant video websocket with webcam capture disabled; capture is opt-in, sampled, size-bounded, and retained locally for a configurable period.
+- Link frames to transcript time using the recording-start event and frame receive time. Attendee's current frame payload has no media timestamp, so links are approximate and must remain labeled as such.
+- Summarize nearby frames only for transcript-verified task proposals, and expose frame IDs, timestamps, and summaries to reviewers; optionally attach the source JPEG to Jira.
+- Require a protected WSS endpoint and a shared secret. Verify platform consent/permission behavior before enabling capture for real meetings; keep capture disabled by default and document separate Jira retention.
+- Keep audio transcription as the source of spoken commitments and ownership; screen content provides context and must not create a task or invent an owner.
 
 **Done when:** task proposals can include relevant, time-linked screen context; reviewers can inspect how it informed a proposal; and capture and retention behavior are documented and configurable.
 

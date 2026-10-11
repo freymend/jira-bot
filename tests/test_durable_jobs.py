@@ -109,7 +109,7 @@ class DurableJobTests(unittest.TestCase):
                     "context_evidence_json",
                 }.issubset(task_columns)
             )
-            self.assertEqual(versions, [1, 2, 3, 4, 5, 6])
+            self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8])
             self.assertEqual(jobs, 1)
             self.assertIsNotNone(cache_table)
             self.assertIsNotNone(calendar_join_table)

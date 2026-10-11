@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from app import db
 from app.config import settings
 from app.integrations.attendee import AttendeeClient
 from app.integrations.jira import JiraClient
+from app.integrations.screenshare import add_screenshare_context
 from app.integrations.task_extraction import extract_tasks
 from app.integrations.transcript import normalize_segments
 from app.network import is_ambiguous_write_error, is_safe_to_retry_write
@@ -30,9 +30,8 @@ async def finalize_meeting(bot_id: str) -> None:
         meeting = db.get_meeting(bot_id) or meeting
         proposals = await extract_tasks(segments, bot_id=bot_id)
         transcript_text = "\n".join(segment["text"] for segment in segments).casefold()
-        approved: list[dict[str, Any]] = []
+        eligible = []
         for proposal in proposals.tasks:
-            item = proposal.model_dump(mode="json", exclude={"context_query"})
             if proposal.confidence < settings.llm_confidence_threshold:
                 continue
             if proposal.evidence_quote.casefold() not in transcript_text:
@@ -41,7 +40,12 @@ async def finalize_meeting(bot_id: str) -> None:
                     bot_id,
                 )
                 continue
-            approved.append(item)
+            eligible.append(proposal)
+        eligible = await add_screenshare_context(eligible, bot_id)
+        approved = [
+            proposal.model_dump(mode="json", exclude={"context_query"})
+            for proposal in eligible
+        ]
 
         has_jira_error = False
         for item in approved:
@@ -68,7 +72,18 @@ async def finalize_meeting(bot_id: str) -> None:
 
             db.set_task_status(row["id"], "creating")
             try:
-                key = await jira.create_issue(item, meeting.get("meeting_url"))
+                screen_frames = []
+                if settings.jira_attach_screenshare_evidence:
+                    screen_frames = [
+                        frame
+                        for evidence in item.get("visual_evidence", [])
+                        if (frame := db.get_screen_frame(bot_id, evidence["frame_id"]))
+                    ]
+                key = await jira.create_issue(
+                    item,
+                    meeting.get("meeting_url"),
+                    screen_frames=screen_frames,
+                )
                 db.set_task_status(row["id"], "created", jira_key=key)
             except Exception as exc:
                 if is_safe_to_retry_write(exc):

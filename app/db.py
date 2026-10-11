@@ -113,6 +113,138 @@ def list_calendar_auto_joins(limit: int = 20) -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+def get_calendar_sync_token(calendar_id: str) -> str | None:
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT sync_token FROM calendar_sync_state WHERE calendar_id=?",
+            (calendar_id,),
+        ).fetchone()
+        return str(row["sync_token"]) if row is not None else None
+
+
+def reset_calendar_sync(calendar_id: str) -> None:
+    with _connect() as connection:
+        connection.execute(
+            "DELETE FROM calendar_scheduled_events WHERE calendar_id=?",
+            (calendar_id,),
+        )
+        connection.execute(
+            "DELETE FROM calendar_sync_state WHERE calendar_id=?", (calendar_id,)
+        )
+
+
+def apply_calendar_sync(
+    calendar_id: str, changes: list[dict[str, Any]], sync_token: str
+) -> None:
+    now = _now()
+    with _connect() as connection:
+        for change in changes:
+            event_key = change["event_key"]
+            if change["action"] == "delete":
+                connection.execute(
+                    """DELETE FROM calendar_scheduled_events
+                       WHERE calendar_id=? AND event_key=?""",
+                    (calendar_id, event_key),
+                )
+            else:
+                connection.execute(
+                    """INSERT INTO calendar_scheduled_events
+                       (calendar_id, event_key, calendar_event_id, event_start,
+                        meeting_url, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(calendar_id, event_key) DO UPDATE SET
+                         calendar_event_id=excluded.calendar_event_id,
+                         event_start=excluded.event_start,
+                         meeting_url=excluded.meeting_url,
+                         updated_at=excluded.updated_at""",
+                    (
+                        calendar_id,
+                        event_key,
+                        change["calendar_event_id"],
+                        change["event_start"],
+                        change["meeting_url"],
+                        now,
+                    ),
+                )
+        connection.execute(
+            """INSERT INTO calendar_sync_state(calendar_id, sync_token, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(calendar_id) DO UPDATE SET
+                 sync_token=excluded.sync_token, updated_at=excluded.updated_at""",
+            (calendar_id, sync_token, now),
+        )
+
+
+def list_due_calendar_events(
+    calendar_id: str, time_min: str, time_max: str
+) -> list[dict[str, Any]]:
+    with _connect() as connection:
+        rows = connection.execute(
+            """SELECT event_key, calendar_event_id, event_start, meeting_url
+               FROM calendar_scheduled_events
+               WHERE calendar_id=? AND event_start>=? AND event_start<=?
+               ORDER BY event_start LIMIT 100""",
+            (calendar_id, time_min, time_max),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def create_calendar_watch_channel(
+    channel_id: str, calendar_id: str, channel_token: str, expiration_ms: int
+) -> None:
+    now = _now()
+    with _connect() as connection:
+        connection.execute(
+            """INSERT INTO calendar_watch_channels
+               (channel_id, calendar_id, channel_token, expiration_ms, status,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'pending', ?, ?)""",
+            (channel_id, calendar_id, channel_token, expiration_ms, now, now),
+        )
+
+
+def activate_calendar_watch_channel(
+    channel_id: str, resource_id: str, expiration_ms: int
+) -> None:
+    with _connect() as connection:
+        connection.execute(
+            """UPDATE calendar_watch_channels SET resource_id=?, expiration_ms=?,
+                 status='active', updated_at=? WHERE channel_id=?""",
+            (resource_id, expiration_ms, _now(), channel_id),
+        )
+
+
+def get_calendar_watch_channel(channel_id: str) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute(
+            """SELECT channel_id, calendar_id, channel_token, resource_id,
+                      expiration_ms, status
+               FROM calendar_watch_channels WHERE channel_id=?""",
+            (channel_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+
+def get_current_calendar_watch(calendar_id: str) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute(
+            """SELECT channel_id, calendar_id, channel_token, resource_id,
+                      expiration_ms, status
+               FROM calendar_watch_channels
+               WHERE calendar_id=? AND status='active'
+               ORDER BY created_at DESC LIMIT 1""",
+            (calendar_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+
+def delete_calendar_watch_channel(channel_id: str) -> None:
+    with _connect() as connection:
+        connection.execute(
+            "DELETE FROM calendar_watch_channels WHERE channel_id=?", (channel_id,)
+        )
+
+
 def update_bot_state(bot_id: str, bot_state: str) -> None:
     with _connect() as connection:
         connection.execute(
@@ -207,6 +339,144 @@ def save_final_transcript(bot_id: str, segments: list[dict[str, Any]]) -> None:
             (json.dumps(segments, ensure_ascii=False), bot_id),
         )
     save_segments(bot_id, segments)
+
+
+def set_recording_started_at(bot_id: str, started_at_ms: int) -> None:
+    with _connect() as connection:
+        meeting = connection.execute(
+            "SELECT recording_started_at_ms FROM meetings WHERE bot_id=?",
+            (bot_id,),
+        ).fetchone()
+        if meeting is None:
+            return
+        origin = meeting["recording_started_at_ms"] or started_at_ms
+        connection.execute(
+            """UPDATE meetings
+               SET recording_started_at_ms=?, screen_frame_origin_ms=?,
+                   screen_frame_origin_source='recording_state'
+               WHERE bot_id=?""",
+            (origin, origin, bot_id),
+        )
+        connection.execute(
+            """UPDATE screen_frames
+               SET timestamp_ms=MAX(received_at_ms - ?, 0),
+                   time_source='recording_state'
+               WHERE bot_id=?""",
+            (origin, bot_id),
+        )
+
+
+def store_screen_frame(
+    bot_id: str,
+    frame_data: bytes,
+    *,
+    received_at_ms: int,
+    participant_uuid: str | None,
+) -> int | None:
+    now = time.time()
+    cutoff = now - settings.screenshare_retention_hours * 3600
+    with _connect() as connection:
+        connection.execute("DELETE FROM screen_frames WHERE created_at < ?", (cutoff,))
+        meeting = connection.execute(
+            """SELECT recording_started_at_ms, screen_frame_origin_ms
+               FROM meetings WHERE bot_id=?""",
+            (bot_id,),
+        ).fetchone()
+        if meeting is None:
+            return None
+        last_frame = connection.execute(
+            """SELECT received_at_ms FROM screen_frames
+               WHERE bot_id=? ORDER BY received_at_ms DESC LIMIT 1""",
+            (bot_id,),
+        ).fetchone()
+        if last_frame is not None and (
+            received_at_ms - last_frame["received_at_ms"]
+            < settings.screenshare_sample_interval_seconds * 1000
+        ):
+            return None
+        frame_count = connection.execute(
+            "SELECT COUNT(*) FROM screen_frames WHERE bot_id=?", (bot_id,)
+        ).fetchone()[0]
+        if frame_count >= settings.screenshare_max_frames_per_meeting:
+            return None
+
+        origin = meeting["recording_started_at_ms"] or meeting["screen_frame_origin_ms"]
+        time_source = "recording_state" if meeting["recording_started_at_ms"] else "first_frame"
+        if origin is None:
+            origin = received_at_ms
+            connection.execute(
+                """UPDATE meetings
+                   SET screen_frame_origin_ms=?, screen_frame_origin_source='first_frame'
+                   WHERE bot_id=? AND screen_frame_origin_ms IS NULL""",
+                (origin, bot_id),
+            )
+        timestamp_ms = max(0, received_at_ms - int(origin))
+        cursor = connection.execute(
+            """INSERT INTO screen_frames
+               (bot_id, timestamp_ms, received_at_ms, time_source,
+                participant_uuid, frame_data, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                bot_id,
+                timestamp_ms,
+                received_at_ms,
+                time_source,
+                participant_uuid,
+                sqlite3.Binary(frame_data),
+                now,
+            ),
+        )
+        return cursor.lastrowid
+
+
+def get_screen_frames_near(
+    bot_id: str, timestamp_ms: int, *, window_ms: int, limit: int = 2
+) -> list[dict[str, Any]]:
+    with _connect() as connection:
+        rows = connection.execute(
+            """SELECT id, bot_id, timestamp_ms, time_source, participant_uuid,
+                      frame_data, summary
+               FROM screen_frames
+               WHERE bot_id=? AND timestamp_ms BETWEEN ? AND ?
+               ORDER BY ABS(timestamp_ms - ?), timestamp_ms
+               LIMIT ?""",
+            (
+                bot_id,
+                max(0, timestamp_ms - window_ms),
+                timestamp_ms + window_ms,
+                timestamp_ms,
+                limit,
+            ),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_screen_frame(bot_id: str, frame_id: int) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute(
+            """SELECT id, bot_id, timestamp_ms, time_source, participant_uuid,
+                      frame_data, summary
+               FROM screen_frames WHERE bot_id=? AND id=?""",
+            (bot_id, frame_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+
+def save_screen_frame_summary(frame_id: int, summary: str) -> None:
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE screen_frames SET summary=? WHERE id=?",
+            (summary[:2000], frame_id),
+        )
+
+
+def delete_expired_screen_frames() -> int:
+    cutoff = time.time() - settings.screenshare_retention_hours * 3600
+    with _connect() as connection:
+        result = connection.execute(
+            "DELETE FROM screen_frames WHERE created_at < ?", (cutoff,)
+        )
+        return result.rowcount
 
 
 def clear_stale_extraction_checkpoints(bot_id: str, transcript_hash: str) -> None:
@@ -453,8 +723,9 @@ def add_task(bot_id: str, task: dict[str, Any]) -> tuple[sqlite3.Row, bool]:
             """INSERT OR IGNORE INTO tasks
                (bot_id, fingerprint, summary, description, owner_speaker,
                 owner_evidence_quote, owner_timestamp_ms, due_date, priority,
-                evidence_quote, timestamp_ms, context_evidence_json, confidence)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                evidence_quote, timestamp_ms, context_evidence_json,
+                visual_evidence_json, confidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 bot_id,
                 fingerprint,
@@ -468,6 +739,7 @@ def add_task(bot_id: str, task: dict[str, Any]) -> tuple[sqlite3.Row, bool]:
                 task["evidence_quote"],
                 task.get("timestamp_ms"),
                 json.dumps(task.get("context_evidence", []), ensure_ascii=False),
+                json.dumps(task.get("visual_evidence", []), ensure_ascii=False),
                 task["confidence"],
             ),
         )
@@ -476,7 +748,8 @@ def add_task(bot_id: str, task: dict[str, Any]) -> tuple[sqlite3.Row, bool]:
             connection.execute(
                 """UPDATE tasks SET summary=?, description=?, owner_speaker=?,
                    owner_evidence_quote=?, owner_timestamp_ms=?, due_date=?, priority=?,
-                   evidence_quote=?, timestamp_ms=?, context_evidence_json=?, confidence=?
+                   evidence_quote=?, timestamp_ms=?, context_evidence_json=?,
+                   visual_evidence_json=?, confidence=?
                    WHERE bot_id=? AND fingerprint=? AND jira_key IS NULL
                      AND status IN ('pending', 'dry_run')""",
                 (
@@ -490,6 +763,7 @@ def add_task(bot_id: str, task: dict[str, Any]) -> tuple[sqlite3.Row, bool]:
                     task["evidence_quote"],
                     task.get("timestamp_ms"),
                     json.dumps(task.get("context_evidence", []), ensure_ascii=False),
+                    json.dumps(task.get("visual_evidence", []), ensure_ascii=False),
                     task["confidence"],
                     bot_id,
                     fingerprint,
@@ -512,6 +786,16 @@ def set_task_status(
         )
 
 
+def meeting_exists(bot_id: str) -> bool:
+    with _connect() as connection:
+        return (
+            connection.execute(
+                "SELECT 1 FROM meetings WHERE bot_id=?", (bot_id,)
+            ).fetchone()
+            is not None
+        )
+
+
 def get_meeting(bot_id: str) -> dict[str, Any] | None:
     with _connect() as connection:
         meeting = connection.execute(
@@ -528,6 +812,9 @@ def get_meeting(bot_id: str) -> dict[str, Any] | None:
             task = dict(row)
             task["context_evidence"] = json.loads(
                 task.pop("context_evidence_json", "[]") or "[]"
+            )
+            task["visual_evidence"] = json.loads(
+                task.pop("visual_evidence_json", "[]") or "[]"
             )
             result["tasks"].append(task)
         return result

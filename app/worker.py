@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import socket
+import time
 from typing import Any
 
 from app import db
@@ -71,6 +72,8 @@ async def _process_job(job: dict[str, Any], worker_id: str) -> None:
 
 async def run_worker() -> None:
     db.init_db()
+    db.delete_expired_screen_frames()
+    last_screen_frame_cleanup = time.monotonic()
     worker_id = os.getenv("WORKER_ID") or f"{socket.gethostname()}:{os.getpid()}"
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -79,6 +82,9 @@ async def run_worker() -> None:
 
     logger.info("Background worker %s started", worker_id)
     while not stop.is_set():
+        if time.monotonic() - last_screen_frame_cleanup >= 60:
+            db.delete_expired_screen_frames()
+            last_screen_frame_cleanup = time.monotonic()
         db.record_worker_heartbeat(worker_id)
         job = db.claim_next_job(worker_id, lease_seconds=LEASE_SECONDS)
         if job is not None:

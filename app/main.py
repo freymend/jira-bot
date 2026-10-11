@@ -1,17 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import JSONResponse, Response
 
 from app import db
 from app.calendar_scheduler import run_calendar_auto_join
@@ -28,6 +40,7 @@ logger = logging.getLogger("jira-bot")
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     db.init_db()
+    db.delete_expired_screen_frames()
     calendar_task: asyncio.Task[None] | None = None
     if settings.google_calendar_auto_join_enabled:
         calendar_task = asyncio.create_task(
@@ -128,6 +141,21 @@ async def meeting_status(bot_id: str) -> dict[str, Any]:
     return meeting
 
 
+@app.get(
+    "/meetings/{bot_id}/screen-frames/{frame_id}",
+    dependencies=[Depends(require_app_auth)],
+)
+async def screen_share_frame(bot_id: str, frame_id: int) -> Response:
+    frame = db.get_screen_frame(bot_id, frame_id)
+    if frame is None:
+        raise HTTPException(status_code=404, detail="Screen-share frame not found")
+    return Response(
+        content=frame["frame_data"],
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
 @app.post("/meetings/{bot_id}/reprocess", dependencies=[Depends(require_app_auth)])
 async def reprocess_meeting(bot_id: str) -> dict[str, str]:
     if db.get_meeting(bot_id) is None:
@@ -136,6 +164,18 @@ async def reprocess_meeting(bot_id: str) -> dict[str, str]:
     if status == "completed":
         raise HTTPException(status_code=409, detail="Meeting is already completed")
     return {"bot_id": bot_id, "status": status}
+
+
+def _timestamp_ms(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return int(parsed.timestamp() * 1000)
 
 
 def _event_is_final(payload: dict[str, Any]) -> bool:
@@ -183,7 +223,80 @@ async def attendee_webhook(
         new_state = event_data.get("new_state")
         if new_state:
             db.update_bot_state(bot_id, str(new_state))
+        if new_state == "joined_recording":
+            recording_started_at_ms = _timestamp_ms(event_data.get("created_at"))
+            if recording_started_at_ms is not None:
+                db.set_recording_started_at(bot_id, recording_started_at_ms)
     if trigger == "transcript.update":
         segment = normalize_segments(event_data)
         db.save_segments(bot_id, segment)
     return {"status": "received"}
+
+
+@app.websocket("/webhooks/attendee/video")
+async def attendee_video_websocket(websocket: WebSocket) -> None:
+    token = websocket.query_params.get("token", "")
+    if (
+        not settings.screenshare_capture_enabled
+        or not settings.screenshare_websocket_token
+        or not hmac.compare_digest(
+            token.encode("utf-8"), settings.screenshare_websocket_token.encode("utf-8")
+        )
+    ):
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    max_frame_bytes = 8 * 1024 * 1024
+    max_encoded_bytes = ((max_frame_bytes + 2) // 3) * 4
+    try:
+        while True:
+            try:
+                payload = await websocket.receive_json()
+            except ValueError:
+                await websocket.close(code=1003)
+                return
+            if not isinstance(payload, dict):
+                continue
+            event_data = payload.get("data")
+            if (
+                payload.get("trigger") != "realtime_video.per_participant"
+                or not isinstance(event_data, dict)
+                or event_data.get("source") != "screenshare"
+                or event_data.get("format") != "jpeg"
+            ):
+                continue
+
+            bot_id = str(payload.get("bot_id") or "")
+            if not bot_id or not db.meeting_exists(bot_id):
+                continue
+            encoded_frame = event_data.get("frame")
+            if (
+                not isinstance(encoded_frame, str)
+                or not encoded_frame
+                or len(encoded_frame) > max_encoded_bytes
+            ):
+                continue
+            try:
+                frame_data = base64.b64decode(encoded_frame, validate=True)
+            except (ValueError, binascii.Error):
+                continue
+            if (
+                len(frame_data) > max_frame_bytes
+                or not frame_data.startswith(b"\xff\xd8")
+                or not frame_data.endswith(b"\xff\xd9")
+            ):
+                continue
+            participant_uuid = event_data.get("participant_uuid")
+            db.store_screen_frame(
+                bot_id,
+                frame_data,
+                received_at_ms=int(time.time() * 1000),
+                participant_uuid=(
+                    str(participant_uuid)[:255]
+                    if isinstance(participant_uuid, str)
+                    else None
+                ),
+            )
+    except WebSocketDisconnect:
+        return
