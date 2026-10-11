@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.integrations.task_extraction import _expand_owner_quote
 from scripts.evaluate_task_extraction import _score
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "synthetic_daily_sync.json"
@@ -55,6 +56,25 @@ class SyntheticTaskExtractionEvalTests(unittest.TestCase):
                     by_id[task["owner_evidence_segment_id"]]["text"],
                     task["id"],
                 )
+
+    def test_expands_same_segment_pronoun_assignment_but_not_ambiguous_language(self) -> None:
+        assigned_segment = (
+            "Zachary is out today, but let's assign him the parser tests for when he returns."
+        )
+        assignment_quote = "let's assign him the parser tests for when he returns."
+        self.assertEqual(
+            _expand_owner_quote("Zachary", assignment_quote, assigned_segment),
+            assigned_segment,
+        )
+
+        ambiguous_segment = (
+            "Zachary is out today; perhaps we should assign him the parser tests."
+        )
+        ambiguous_quote = "perhaps we should assign him the parser tests."
+        self.assertEqual(
+            _expand_owner_quote("Zachary", ambiguous_quote, ambiguous_segment),
+            ambiguous_quote,
+        )
 
     def test_scorer_limits_metrics_to_target_owner_and_normalizes_alias(self) -> None:
         expected = [
