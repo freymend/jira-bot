@@ -7,7 +7,7 @@ import sqlite3
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +51,66 @@ def create_meeting(
                  bot_state=COALESCE(excluded.bot_state, meetings.bot_state)""",
             (bot_id, meeting_url, bot_state, _now()),
         )
+
+
+def claim_calendar_auto_join(
+    event_key: str, calendar_event_id: str, event_start: str
+) -> bool:
+    now = _now()
+    with _connect() as connection:
+        result = connection.execute(
+            """INSERT OR IGNORE INTO calendar_auto_join_requests
+               (event_key, calendar_event_id, event_start, status, created_at, updated_at)
+               VALUES (?, ?, ?, 'requesting', ?, ?)""",
+            (event_key, calendar_event_id, event_start, now, now),
+        )
+        return result.rowcount == 1
+
+
+def finish_calendar_auto_join(
+    event_key: str,
+    status: str,
+    *,
+    bot_id: str | None = None,
+    error: str | None = None,
+) -> None:
+    if status not in {"requested", "uncertain"}:
+        raise ValueError("Invalid calendar auto-join status")
+    with _connect() as connection:
+        connection.execute(
+            """UPDATE calendar_auto_join_requests
+               SET status=?, bot_id=COALESCE(?, bot_id), error=?, updated_at=?
+               WHERE event_key=?""",
+            (status, bot_id, error[:1000] if error else None, _now(), event_key),
+        )
+
+
+def mark_stale_calendar_auto_joins_uncertain(
+    *, stale_after_seconds: int = 300
+) -> int:
+    cutoff = (datetime.now(UTC) - timedelta(seconds=stale_after_seconds)).isoformat()
+    with _connect() as connection:
+        result = connection.execute(
+            """UPDATE calendar_auto_join_requests
+               SET status='uncertain', error='Request interrupted; verify Attendee before retrying.',
+                   updated_at=?
+               WHERE status='requesting' AND updated_at < ?""",
+            (_now(), cutoff),
+        )
+        return result.rowcount
+
+
+def list_calendar_auto_joins(limit: int = 20) -> list[dict[str, Any]]:
+    bounded_limit = min(max(limit, 1), 100)
+    with _connect() as connection:
+        rows = connection.execute(
+            """SELECT calendar_event_id, event_start, status, bot_id, error,
+                      created_at, updated_at
+               FROM calendar_auto_join_requests
+               ORDER BY event_start DESC LIMIT ?""",
+            (bounded_limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def update_bot_state(bot_id: str, bot_state: str) -> None:

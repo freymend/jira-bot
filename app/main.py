@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -13,6 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app import db
+from app.calendar_scheduler import run_calendar_auto_join
 from app.config import settings
 from app.integrations.attendee import verify_attendee_signature
 from app.integrations.transcript import normalize_segments
@@ -26,9 +28,20 @@ logger = logging.getLogger("jira-bot")
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     db.init_db()
+    calendar_task: asyncio.Task[None] | None = None
+    if settings.google_calendar_auto_join_enabled:
+        calendar_task = asyncio.create_task(
+            run_calendar_auto_join(attendee), name="google-calendar-auto-join"
+        )
     try:
         yield
     finally:
+        if calendar_task is not None:
+            calendar_task.cancel()
+            try:
+                await calendar_task
+            except asyncio.CancelledError:
+                pass
         await attendee.close()
 
 
@@ -64,6 +77,17 @@ async def health() -> JSONResponse:
             },
         },
     )
+
+
+@app.get("/calendar/auto-join", dependencies=[Depends(require_app_auth)])
+async def calendar_auto_join_status(limit: int = 20) -> dict[str, Any]:
+    return {
+        "enabled": settings.google_calendar_auto_join_enabled,
+        "event_title": settings.google_calendar_event_title or None,
+        "start_time": settings.google_calendar_start_time,
+        "time_zone": settings.google_calendar_timezone,
+        "recent_requests": db.list_calendar_auto_joins(limit),
+    }
 
 
 @app.post("/meetings", dependencies=[Depends(require_app_auth)])

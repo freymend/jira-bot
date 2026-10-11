@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import time as datetime_time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -42,6 +44,8 @@ class Settings:
     llm_base_url: str
     llm_api_key: str
     llm_model: str
+    llm_context_tokens: int
+    llm_max_completion_tokens: int
     llm_confidence_threshold: float
     jira_dry_run: bool
     jira_base_url: str
@@ -51,6 +55,18 @@ class Settings:
     jira_issue_type: str
     jira_speaker_account_ids: dict[str, str]
     jira_priority_map: dict[str, str]
+    google_calendar_auto_join_enabled: bool
+    google_calendar_client_id: str
+    google_calendar_client_secret: str
+    google_calendar_refresh_token: str
+    google_calendar_id: str
+    google_calendar_event_title: str
+    google_calendar_organizer_email: str
+    google_calendar_timezone: str
+    google_calendar_start_time: str
+    google_calendar_poll_seconds: int
+    google_calendar_join_lead_minutes: int
+    google_calendar_join_grace_minutes: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -71,6 +87,53 @@ class Settings:
                 "enough room for prompt content and safety margins"
             )
         calendar_auto_join_enabled = _bool("GOOGLE_CALENDAR_AUTO_JOIN_ENABLED", False)
+        calendar_client_id = os.getenv("GOOGLE_CALENDAR_CLIENT_ID", "").strip()
+        calendar_client_secret = os.getenv("GOOGLE_CALENDAR_CLIENT_SECRET", "").strip()
+        calendar_refresh_token = os.getenv("GOOGLE_CALENDAR_REFRESH_TOKEN", "").strip()
+        calendar_id = os.getenv("GOOGLE_CALENDAR_ID", "primary").strip() or "primary"
+        calendar_event_title = os.getenv("GOOGLE_CALENDAR_EVENT_TITLE", "").strip()
+        calendar_organizer_email = (
+            os.getenv("GOOGLE_CALENDAR_ORGANIZER_EMAIL", "").strip().casefold()
+        )
+        calendar_timezone = os.getenv(
+            "GOOGLE_CALENDAR_TIME_ZONE", "America/Los_Angeles"
+        ).strip()
+        calendar_start_time = os.getenv("GOOGLE_CALENDAR_START_TIME", "10:00").strip()
+        calendar_poll_seconds = int(os.getenv("GOOGLE_CALENDAR_POLL_SECONDS", "60"))
+        calendar_join_lead_minutes = int(
+            os.getenv("GOOGLE_CALENDAR_JOIN_LEAD_MINUTES", "5")
+        )
+        calendar_join_grace_minutes = int(
+            os.getenv("GOOGLE_CALENDAR_JOIN_GRACE_MINUTES", "2")
+        )
+        try:
+            datetime_time.fromisoformat(calendar_start_time)
+            ZoneInfo(calendar_timezone)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise RuntimeError(
+                "Google Calendar start time or time zone is invalid"
+            ) from exc
+        if not 10 <= calendar_poll_seconds <= 3600:
+            raise RuntimeError("GOOGLE_CALENDAR_POLL_SECONDS must be 10-3600")
+        if not 1 <= calendar_join_lead_minutes <= 30:
+            raise RuntimeError("GOOGLE_CALENDAR_JOIN_LEAD_MINUTES must be 1-30")
+        if not 0 <= calendar_join_grace_minutes <= 15:
+            raise RuntimeError("GOOGLE_CALENDAR_JOIN_GRACE_MINUTES must be 0-15")
+        if calendar_auto_join_enabled:
+            required_calendar_values = {
+                "GOOGLE_CALENDAR_CLIENT_ID": calendar_client_id,
+                "GOOGLE_CALENDAR_CLIENT_SECRET": calendar_client_secret,
+                "GOOGLE_CALENDAR_REFRESH_TOKEN": calendar_refresh_token,
+                "GOOGLE_CALENDAR_EVENT_TITLE": calendar_event_title,
+            }
+            missing_calendar_values = [
+                name for name, value in required_calendar_values.items() if not value
+            ]
+            if missing_calendar_values:
+                raise RuntimeError(
+                    "Google Calendar auto-join is enabled but missing: "
+                    + ", ".join(missing_calendar_values)
+                )
         return cls(
             app_api_token=os.getenv("APP_API_TOKEN", ""),
             app_public_url=os.getenv("APP_PUBLIC_URL", "").rstrip("/"),
@@ -100,6 +163,18 @@ class Settings:
             jira_issue_type=os.getenv("JIRA_ISSUE_TYPE", "Task"),
             jira_speaker_account_ids=_json_mapping("JIRA_SPEAKER_ACCOUNT_IDS"),
             jira_priority_map=_json_mapping("JIRA_PRIORITY_MAP"),
+            google_calendar_auto_join_enabled=calendar_auto_join_enabled,
+            google_calendar_client_id=calendar_client_id,
+            google_calendar_client_secret=calendar_client_secret,
+            google_calendar_refresh_token=calendar_refresh_token,
+            google_calendar_id=calendar_id,
+            google_calendar_event_title=calendar_event_title,
+            google_calendar_organizer_email=calendar_organizer_email,
+            google_calendar_timezone=calendar_timezone,
+            google_calendar_start_time=calendar_start_time,
+            google_calendar_poll_seconds=calendar_poll_seconds,
+            google_calendar_join_lead_minutes=calendar_join_lead_minutes,
+            google_calendar_join_grace_minutes=calendar_join_grace_minutes,
         )
 
 

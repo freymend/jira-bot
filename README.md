@@ -4,7 +4,7 @@ This service joins a Google Meet with a locally hosted Attendee bot. Attendee se
 
 ## Pipeline
 
-1. `POST /meetings` creates an Attendee bot and configures `bot.state_change` and `transcript.update` callbacks.
+1. `POST /meetings` creates an Attendee bot and configures `bot.state_change` and `transcript.update` callbacks. When optional Google Calendar auto-join is enabled, the API polls the configured recurring event and calls the same bot-creation flow shortly before it starts.
 2. Attendee sends MP3 audio segments to the local MLX Whisper service through its `custom_async_v2` provider and emits signed transcript webhooks. Webhooks are verified and deduplicated; utterances are persisted as they arrive.
 3. On `post_processing_completed`, the API atomically records the signed webhook and a finalization job in SQLite. A separate worker fetches the canonical locally generated transcript from Attendee and extracts task proposals in chunks. For each proposal, Gemma reviews a bounded time window and transcript-wide keyword matches to add relevant background and cite the source excerpts. Duplicate webhook deliveries are ignored.
 4. High-confidence tasks with a verified task quote are saved alongside separate assignment evidence and contextual transcript excerpts. Jira issue creation is attempted only when dry-run is disabled and Jira credentials are configured.
@@ -63,6 +63,27 @@ The local model defaults to a 16,384-token context, controlled by `LLM_CONTEXT_T
 ```sh
 cp .env.example .env
 ```
+
+## Enable automatic Google Calendar join requests
+
+Auto-join is disabled by default. To enable it, create a Google Cloud OAuth desktop client, enable the Google Calendar API, and grant the read-only `calendar.events.readonly` scope. Put the client ID and secret in `.env`, then run the local consent helper:
+
+```sh
+uv run --no-active --group dev python -m scripts.google_calendar_auth
+```
+
+The helper opens Google consent in your browser and prints a refresh token. Keep it private and add it to `.env` as `GOOGLE_CALENDAR_REFRESH_TOKEN`. Configure the event filter and enable the feature:
+
+```dotenv
+GOOGLE_CALENDAR_AUTO_JOIN_ENABLED=true
+GOOGLE_CALENDAR_ID=primary
+GOOGLE_CALENDAR_EVENT_TITLE=Daily Product Sync
+GOOGLE_CALENDAR_ORGANIZER_EMAIL=organizer@example.com
+GOOGLE_CALENDAR_TIME_ZONE=America/Los_Angeles
+GOOGLE_CALENDAR_START_TIME=10:00
+```
+
+The organizer filter is optional but recommended. The API polls upcoming calendar occurrences, selects only an exact title match at the configured local time with a valid Google Meet link, and requests the Attendee bot five minutes before start (with a two-minute late grace period). Canceled events and events without a Meet link are skipped. Google also offers [push notifications](https://developers.google.com/workspace/calendar/api/guides/push), but those signal calendar changes rather than meeting start times and require a publicly reachable HTTPS webhook; this local Compose setup uses polling. The event occurrence is recorded before the external bot request; an uncertain request is not retried automatically to avoid duplicate bots. Inspect recent attempts at `GET /calendar/auto-join` with the app bearer token. A host may still need to admit the bot.
 
 Project dependencies are declared in `pyproject.toml`; `uv.lock` records the resolved versions. For local development, run `uv sync --no-active --group dev` to create the project `.venv` and install the local MLX Whisper service package into that same environment.
 
