@@ -9,6 +9,7 @@ from app.integrations.attendee import AttendeeClient
 from app.integrations.jira import JiraClient
 from app.integrations.task_extraction import extract_tasks
 from app.integrations.transcript import normalize_segments
+from app.network import is_ambiguous_write_error, is_safe_to_retry_write
 
 logger = logging.getLogger("jira-bot.pipeline")
 attendee = AttendeeClient()
@@ -18,13 +19,16 @@ jira = JiraClient()
 async def finalize_meeting(bot_id: str) -> None:
     db.set_meeting_status(bot_id, "processing")
     try:
-        transcript_response = await attendee.get_transcript(bot_id)
-        segments = normalize_segments(transcript_response)
+        meeting = db.get_meeting(bot_id) or {}
+        segments = normalize_segments(meeting.get("transcript"))
+        if not segments:
+            transcript_response = await attendee.get_transcript(bot_id)
+            segments = normalize_segments(transcript_response)
         if not segments:
             raise RuntimeError("Attendee returned an empty transcript")
         db.save_final_transcript(bot_id, segments)
-        meeting = db.get_meeting(bot_id) or {}
-        proposals = await extract_tasks(segments)
+        meeting = db.get_meeting(bot_id) or meeting
+        proposals = await extract_tasks(segments, bot_id=bot_id)
         transcript_text = "\n".join(segment["text"] for segment in segments).casefold()
         approved: list[dict[str, Any]] = []
         for proposal in proposals.tasks:
@@ -67,8 +71,12 @@ async def finalize_meeting(bot_id: str) -> None:
                 key = await jira.create_issue(item, meeting.get("meeting_url"))
                 db.set_task_status(row["id"], "created", jira_key=key)
             except Exception as exc:
+                if is_safe_to_retry_write(exc):
+                    db.set_task_status(row["id"], "pending", error=str(exc)[:1000])
+                    raise
                 has_jira_error = True
-                db.set_task_status(row["id"], "uncertain", error=str(exc)[:1000])
+                status = "uncertain" if is_ambiguous_write_error(exc) else "error"
+                db.set_task_status(row["id"], status, error=str(exc)[:1000])
                 logger.exception("Jira issue creation failed for bot %s", bot_id)
 
         status = (

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import sqlite3
 import time
 from collections.abc import Generator
@@ -148,6 +149,73 @@ def save_final_transcript(bot_id: str, segments: list[dict[str, Any]]) -> None:
     save_segments(bot_id, segments)
 
 
+def clear_stale_extraction_checkpoints(bot_id: str, transcript_hash: str) -> None:
+    with _connect() as connection:
+        connection.execute(
+            "DELETE FROM task_extraction_cache WHERE bot_id=? AND transcript_hash!=?",
+            (bot_id, transcript_hash),
+        )
+
+
+def get_extraction_checkpoint(
+    bot_id: str, transcript_hash: str, stage: str, item_key: str
+) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute(
+            """SELECT result_json FROM task_extraction_cache
+               WHERE bot_id=? AND transcript_hash=? AND stage=? AND item_key=?""",
+            (bot_id, transcript_hash, stage, item_key),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row["result_json"])
+        except json.JSONDecodeError:
+            connection.execute(
+                """DELETE FROM task_extraction_cache
+                   WHERE bot_id=? AND transcript_hash=? AND stage=? AND item_key=?""",
+                (bot_id, transcript_hash, stage, item_key),
+            )
+            return None
+
+
+def delete_extraction_checkpoint(
+    bot_id: str, transcript_hash: str, stage: str, item_key: str
+) -> None:
+    with _connect() as connection:
+        connection.execute(
+            """DELETE FROM task_extraction_cache
+               WHERE bot_id=? AND transcript_hash=? AND stage=? AND item_key=?""",
+            (bot_id, transcript_hash, stage, item_key),
+        )
+
+
+def save_extraction_checkpoint(
+    bot_id: str,
+    transcript_hash: str,
+    stage: str,
+    item_key: str,
+    result: dict[str, Any],
+) -> None:
+    with _connect() as connection:
+        connection.execute(
+            """INSERT INTO task_extraction_cache
+               (bot_id, transcript_hash, stage, item_key, result_json, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(bot_id, transcript_hash, stage, item_key)
+               DO UPDATE SET result_json=excluded.result_json,
+                             updated_at=excluded.updated_at""",
+            (
+                bot_id,
+                transcript_hash,
+                stage,
+                item_key,
+                json.dumps(result, ensure_ascii=False),
+                time.time(),
+            ),
+        )
+
+
 def enqueue_finalization(bot_id: str, *, allow_reprocess: bool = False) -> str:
     now = time.time()
     with _connect() as connection:
@@ -184,41 +252,28 @@ def enqueue_finalization(bot_id: str, *, allow_reprocess: bool = False) -> str:
         return "processing" if status == "running" else status
 
 
-def claim_next_job(
-    worker_id: str, *, lease_seconds: int = 60, max_attempts: int = 5
-) -> dict[str, Any] | None:
+def claim_next_job(worker_id: str, *, lease_seconds: int = 60) -> dict[str, Any] | None:
     now = time.time()
     with _connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        expired = connection.execute(
-            """SELECT id, bot_id FROM background_jobs
-               WHERE status='running' AND lease_until <= ? AND attempts >= ?""",
-            (now, max_attempts),
-        ).fetchall()
-        for row in expired:
-            error = "Worker lease expired after the maximum number of attempts."
-            updated = connection.execute(
-                """UPDATE background_jobs SET status='failed', lease_until=NULL,
-                     locked_by=NULL, last_error=?, updated_at=?
-                   WHERE id=? AND status='running' AND lease_until <= ? AND attempts >= ?""",
-                (error, now, row["id"], now, max_attempts),
-            )
-            if updated.rowcount == 1:
-                connection.execute(
-                    "UPDATE meetings SET status='error', error=? WHERE bot_id=?",
-                    (error, row["bot_id"]),
-                )
         row = connection.execute(
-            """SELECT id FROM background_jobs
+            """SELECT id, bot_id, status FROM background_jobs
                WHERE available_at <= ?
                  AND (status='queued' OR
-                      (status='running' AND lease_until <= ? AND attempts < ?))
+                      (status='running' AND lease_until <= ?))
                ORDER BY available_at, id LIMIT 1""",
-            (now, now, max_attempts),
+            (now, now),
         ).fetchone()
         if row is None:
             return None
         job_id = int(row["id"])
+        if row["status"] == "running":
+            connection.execute(
+                """UPDATE meetings SET status='retrying',
+                     error='Worker lease expired; recovering the queued job.'
+                   WHERE bot_id=?""",
+                (row["bot_id"],),
+            )
         connection.execute(
             """UPDATE background_jobs SET status='running', attempts=attempts+1,
                  lease_until=?, locked_by=?, updated_at=? WHERE id=?""",
@@ -291,12 +346,14 @@ def fail_job(
     error: str,
     *,
     attempts: int,
-    max_attempts: int = 5,
+    retryable: bool,
+    retry_after_seconds: float | None = None,
 ) -> str:
     now = time.time()
-    is_terminal = attempts >= max_attempts
-    delay = min(5 * (2 ** max(attempts - 1, 0)), 300)
-    status = "failed" if is_terminal else "queued"
+    exponent = min(max(attempts - 1, 0), 6)
+    backoff = min(5 * (2**exponent), 300)
+    delay = max(random.uniform(backoff / 2, backoff), retry_after_seconds or 0)
+    status = "queued" if retryable else "failed"
     with _connect() as connection:
         connection.execute(
             """UPDATE background_jobs SET status=?, available_at=?, lease_until=NULL,
@@ -304,7 +361,7 @@ def fail_job(
                WHERE id=? AND status='running' AND locked_by=?""",
             (
                 status,
-                now if is_terminal else now + delay,
+                now + delay if retryable else now,
                 error[:1000],
                 now,
                 job_id,

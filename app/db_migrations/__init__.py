@@ -8,6 +8,7 @@ from .v001_initial_schema import migrate as _create_initial_schema
 from .v002_meeting_bot_state import migrate as _add_meeting_bot_state
 from .v003_task_evidence_columns import migrate as _add_task_evidence_columns
 from .v004_backfill_finalization_jobs import migrate as _backfill_finalization_jobs
+from .v005_task_extraction_cache import migrate as _create_task_extraction_cache
 
 
 def _now() -> str:
@@ -20,6 +21,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (2, _add_meeting_bot_state),
     (3, _add_task_evidence_columns),
     (4, _backfill_finalization_jobs),
+    (5, _create_task_extraction_cache),
 )
 
 

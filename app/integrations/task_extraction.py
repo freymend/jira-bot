@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
 from collections import Counter
 from typing import Any
 
+import httpx
 from openai import AsyncOpenAI
 
+from app import db
 from app.config import settings
 from app.integrations.ownership import (
     ASSIGNABLE_OWNER_NAMES,
@@ -20,6 +23,8 @@ from app.schemas import (
     TaskProposal,
 )
 
+# Bump when the extraction prompts or cached result format changes.
+_CACHE_VERSION = 1
 _CONTEXT_STOP_WORDS = {
     "about",
     "after",
@@ -104,6 +109,39 @@ def _transcript_chunks(
 
 def _normalized_text(text: str) -> str:
     return " ".join(text.split()).casefold()
+
+
+def _transcript_cache_hash(segments: list[dict[str, Any]]) -> str:
+    cache_input = {
+        "version": _CACHE_VERSION,
+        "model": settings.llm_model,
+        "base_url": settings.llm_base_url,
+        "segments": [
+            {
+                "timestamp_ms": segment.get("timestamp_ms"),
+                "speaker_name": str(segment.get("speaker_name") or "Unknown speaker"),
+                "text": str(segment.get("text", "")),
+            }
+            for segment in segments
+        ],
+    }
+    serialized = json.dumps(
+        cache_input, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _task_cache_key(task: TaskProposal) -> str:
+    cache_input = json.dumps(
+        {
+            "version": _CACHE_VERSION,
+            "task": task.model_dump(mode="json", exclude={"context_evidence"}),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(cache_input.encode("utf-8")).hexdigest()
 
 
 def _expand_owner_quote(
@@ -611,8 +649,32 @@ async def extract_tasks(
         for task in deduplicated.values():
             if task.confidence < settings.llm_confidence_threshold:
                 tasks.append(task)
-            else:
-                tasks.append(await _add_task_context(client, task, segments))
+                continue
+
+            context_key = _task_cache_key(task)
+            enriched: TaskProposal | None = None
+            if bot_id is not None and transcript_hash is not None:
+                cached = db.get_extraction_checkpoint(
+                    bot_id, transcript_hash, "context-v1", context_key
+                )
+                if cached is not None:
+                    try:
+                        enriched = TaskProposal.model_validate(cached)
+                    except ValueError:
+                        db.delete_extraction_checkpoint(
+                            bot_id, transcript_hash, "context-v1", context_key
+                        )
+            if enriched is None:
+                enriched = await _add_task_context(client, task, segments)
+                if bot_id is not None and transcript_hash is not None:
+                    db.save_extraction_checkpoint(
+                        bot_id,
+                        transcript_hash,
+                        "context-v1",
+                        context_key,
+                        enriched.model_dump(mode="json"),
+                    )
+            tasks.append(enriched)
     finally:
         await client.close()
     return TaskExtraction(tasks=tasks)

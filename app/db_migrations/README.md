@@ -9,7 +9,7 @@ Schema migrations live in this directory and are applied during `db.init_db()` b
 3. Import the function in [`__init__.py`](./__init__.py) and append `(version, migrate_function)` to `MIGRATIONS`.
 4. Add or update a regression test that initializes a temporary database representing the relevant starting schema. The upgrade/idempotency test is in [`test_durable_jobs.py`](../../tests/test_durable_jobs.py).
 
-For example, the next module could be `v005_add_example_field.py`, registered after version 4. Never reuse, renumber, reorder, or edit a migration that may already have run in a deployed database; add a new version for follow-up changes.
+For example, the next module could be `v006_add_example_field.py`, registered after version 5. Never reuse, renumber, reorder, or edit a migration that may already have run in a deployed database; add a new version for follow-up changes.
 
 ## Transaction and compatibility rules
 
@@ -17,6 +17,10 @@ For example, the next module could be `v005_add_example_field.py`, registered af
 - Use `connection.execute()` rather than `executescript()`, which can interfere with SQLite transaction boundaries. Bind data values as SQL parameters.
 - Keep migrations safe for existing databases that may already have some schema changes but no migration history. Use `IF NOT EXISTS`, [`add_column_if_missing`](./helpers.py), or an equivalent guard where appropriate. Data backfills should also avoid duplicate effects.
 - Keep every historical version in `MIGRATIONS`. The runner rejects recorded versions it does not recognize, preventing an older application from silently starting against a newer schema.
+
+## Extraction checkpoints
+
+Migration v005 creates `task_extraction_cache`. The task extractor stores successful chunk results and per-task context results there, keyed by meeting, a transcript/model hash, and a stage key. A retry can therefore resume after the last successful model call; changing the transcript or configured model starts a fresh cache. Old cache rows for that meeting are removed when a new transcript hash is processed. Bump `_CACHE_VERSION` in `task_extraction.py` when changing prompts or cached-result interpretation.
 
 Run the focused database tests and lint checks after a migration change:
 

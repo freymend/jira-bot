@@ -8,12 +8,12 @@ import socket
 from typing import Any
 
 from app import db
+from app.network import is_transient_network_error, retry_after_seconds
 from app.pipeline import attendee, finalize_meeting
 
 POLL_INTERVAL_SECONDS = 2
 HEARTBEAT_INTERVAL_SECONDS = 10
 LEASE_SECONDS = 60
-MAX_ATTEMPTS = 5
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jira-bot.worker")
@@ -35,17 +35,25 @@ async def _process_job(job: dict[str, Any], worker_id: str) -> None:
     try:
         await finalize_meeting(bot_id)
     except Exception as exc:
+        retryable = is_transient_network_error(exc)
         status = db.fail_job(
             job_id,
             worker_id,
             str(exc),
             attempts=attempts,
-            max_attempts=MAX_ATTEMPTS,
+            retryable=retryable,
+            retry_after_seconds=retry_after_seconds(exc),
+        )
+        db.set_meeting_status(
+            bot_id,
+            "retrying" if status == "queued" else "error",
+            str(exc)[:1000],
         )
         logger.exception(
-            "Finalization job %s for bot %s failed; queue status is %s",
+            "Finalization job %s for bot %s failed; retryable=%s status=%s",
             job_id,
             bot_id,
+            retryable,
             status,
         )
     else:
@@ -72,9 +80,7 @@ async def run_worker() -> None:
     logger.info("Background worker %s started", worker_id)
     while not stop.is_set():
         db.record_worker_heartbeat(worker_id)
-        job = db.claim_next_job(
-            worker_id, lease_seconds=LEASE_SECONDS, max_attempts=MAX_ATTEMPTS
-        )
+        job = db.claim_next_job(worker_id, lease_seconds=LEASE_SECONDS)
         if job is not None:
             await _process_job(job, worker_id)
             continue

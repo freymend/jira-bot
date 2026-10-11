@@ -93,7 +93,7 @@ class JiraClient:
         async with httpx.AsyncClient(
             auth=(settings.jira_email, settings.jira_api_token),
             headers={"Accept": "application/json"},
-            timeout=30,
+            timeout=httpx.Timeout(60, connect=15, write=30, pool=15),
         ) as client:
             response = await client.post(
                 f"{settings.jira_base_url}/rest/api/3/issue",

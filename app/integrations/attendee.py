@@ -18,7 +18,7 @@ class AttendeeClient:
         self.client = httpx.AsyncClient(
             base_url=settings.attendee_api_base.rstrip("/") + "/",
             headers={"Authorization": f"Token {settings.attendee_api_key}"},
-            timeout=30,
+            timeout=httpx.Timeout(60, connect=15, write=30, pool=15),
         )
 
     async def create_bot(self, meeting_url: str) -> dict[str, Any]:
@@ -74,7 +74,10 @@ class AttendeeClient:
         return response.json() if response.content else {"ok": True}
 
     async def get_transcript(self, bot_id: str) -> Any:
-        response = await self.client.get(f"bots/{bot_id}/transcript")
+        response = await self.client.get(
+            f"bots/{bot_id}/transcript",
+            timeout=httpx.Timeout(300, connect=15, write=60, pool=15),
+        )
         response.raise_for_status()
         return response.json()
 

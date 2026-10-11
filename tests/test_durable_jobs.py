@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import time
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -31,7 +33,7 @@ class DurableJobTests(unittest.TestCase):
     def test_migrations_upgrade_legacy_database_and_run_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "legacy.sqlite3"
-            with sqlite3.connect(database_path) as connection:
+            with closing(sqlite3.connect(database_path)) as connection:
                 connection.executescript(
                     """
                     CREATE TABLE meetings (
@@ -90,6 +92,10 @@ class DurableJobTests(unittest.TestCase):
                         "SELECT COUNT(*) AS count FROM background_jobs "
                         "WHERE bot_id='legacy-bot'"
                     ).fetchone()["count"]
+                    cache_table = connection.execute(
+                        """SELECT name FROM sqlite_master
+                           WHERE type='table' AND name='task_extraction_cache'"""
+                    ).fetchone()
 
             self.assertIn("bot_state", meeting_columns)
             self.assertTrue(
@@ -99,8 +105,9 @@ class DurableJobTests(unittest.TestCase):
                     "context_evidence_json",
                 }.issubset(task_columns)
             )
-            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertEqual(versions, [1, 2, 3, 4, 5])
             self.assertEqual(jobs, 1)
+            self.assertIsNotNone(cache_table)
 
     def test_final_webhook_queues_once_and_expired_lease_is_reclaimed(self) -> None:
         payload = {"trigger": "bot.state_change", "bot_id": "bot-1"}
@@ -136,67 +143,104 @@ class DurableJobTests(unittest.TestCase):
         self.assertFalse(db.finish_job(int(first_claim["id"]), "worker-1"))
         self.assertTrue(db.finish_job(int(reclaimed["id"]), "worker-2"))
 
-    def test_failed_job_retries_then_becomes_terminal(self) -> None:
+    def test_transient_job_retries_beyond_the_previous_attempt_limit(self) -> None:
         db.create_meeting("bot-2", "https://meet.google.com/abc-defg-hij")
         self.assertEqual(db.enqueue_finalization("bot-2"), "queued")
 
-        first = db.claim_next_job("worker-1")
-        self.assertIsNotNone(first)
-        assert first is not None
-        self.assertEqual(
-            db.fail_job(
-                int(first["id"]),
-                "worker-1",
-                "temporary failure",
-                attempts=int(first["attempts"]),
-                max_attempts=2,
-            ),
-            "queued",
-        )
-        with db._connect() as connection:
-            connection.execute(
-                "UPDATE background_jobs SET available_at=0 WHERE id=?",
-                (first["id"],),
+        for attempt in range(1, 8):
+            with db._connect() as connection:
+                connection.execute(
+                    "UPDATE background_jobs SET available_at=0 WHERE bot_id='bot-2'"
+                )
+            job = db.claim_next_job(f"worker-{attempt}")
+            self.assertIsNotNone(job)
+            assert job is not None
+            self.assertEqual(job["attempts"], attempt)
+            self.assertEqual(
+                db.fail_job(
+                    int(job["id"]),
+                    f"worker-{attempt}",
+                    "temporary network failure",
+                    attempts=int(job["attempts"]),
+                    retryable=True,
+                ),
+                "queued",
             )
 
-        second = db.claim_next_job("worker-2")
-        self.assertIsNotNone(second)
-        assert second is not None
+        with db._connect() as connection:
+            connection.execute(
+                "UPDATE background_jobs SET available_at=0 WHERE bot_id='bot-2'"
+            )
+        recovered = db.claim_next_job("worker-recovered")
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(recovered["attempts"], 8)
+        self.assertTrue(db.finish_job(int(recovered["id"]), "worker-recovered"))
+
+    def test_permanent_job_failure_is_terminal(self) -> None:
+        db.create_meeting("bot-permanent", "https://meet.google.com/abc-defg-hij")
+        db.enqueue_finalization("bot-permanent")
+        job = db.claim_next_job("worker-1")
+        self.assertIsNotNone(job)
+        assert job is not None
+
         self.assertEqual(
             db.fail_job(
-                int(second["id"]),
-                "worker-2",
-                "permanent failure",
-                attempts=int(second["attempts"]),
-                max_attempts=2,
+                int(job["id"]),
+                "worker-1",
+                "invalid configuration",
+                attempts=int(job["attempts"]),
+                retryable=False,
             ),
             "failed",
         )
+        self.assertIsNone(db.claim_next_job("worker-2"))
 
-    def test_repeated_worker_crashes_exhaust_the_lease_retry_limit(self) -> None:
+    def test_retry_after_sets_the_minimum_next_attempt_time(self) -> None:
+        db.create_meeting("bot-retry-after", "https://meet.google.com/abc-defg-hij")
+        db.enqueue_finalization("bot-retry-after")
+        job = db.claim_next_job("worker-1")
+        self.assertIsNotNone(job)
+        assert job is not None
+
+        now = time.time()
+        with patch("app.db.random.uniform", return_value=1.0):
+            db.fail_job(
+                int(job["id"]),
+                "worker-1",
+                "rate limited",
+                attempts=int(job["attempts"]),
+                retryable=True,
+                retry_after_seconds=120,
+            )
+        with db._connect() as connection:
+            available_at = connection.execute(
+                "SELECT available_at FROM background_jobs WHERE id=?", (job["id"],)
+            ).fetchone()["available_at"]
+
+        self.assertGreaterEqual(available_at, now + 120)
+        self.assertLess(available_at, now + 121)
+
+    def test_repeated_worker_crashes_remain_reclaimable(self) -> None:
         db.create_meeting("bot-lease", "https://meet.google.com/abc-defg-hij")
         db.enqueue_finalization("bot-lease")
 
-        for attempt in range(1, 6):
-            job = db.claim_next_job(
-                f"worker-{attempt}", lease_seconds=0, max_attempts=5
-            )
+        for attempt in range(1, 8):
+            job = db.claim_next_job(f"worker-{attempt}", lease_seconds=0)
             self.assertIsNotNone(job)
             assert job is not None
             self.assertEqual(job["attempts"], attempt)
 
-        self.assertIsNone(
-            db.claim_next_job("worker-final", lease_seconds=60, max_attempts=5)
-        )
+        recovered = db.claim_next_job("worker-recovered", lease_seconds=60)
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(recovered["attempts"], 8)
+        self.assertTrue(db.finish_job(int(recovered["id"]), "worker-recovered"))
         with db._connect() as connection:
-            job_status = connection.execute(
-                "SELECT status FROM background_jobs WHERE bot_id='bot-lease'"
-            ).fetchone()["status"]
             meeting_status = connection.execute(
                 "SELECT status FROM meetings WHERE bot_id='bot-lease'"
             ).fetchone()["status"]
-        self.assertEqual(job_status, "failed")
-        self.assertEqual(meeting_status, "error")
+        self.assertEqual(meeting_status, "retrying")
 
     def test_readiness_requires_a_recent_worker_heartbeat(self) -> None:
         self.assertEqual(db.health_checks(), {"database": True, "worker": False})
