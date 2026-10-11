@@ -14,7 +14,8 @@ from fastapi.responses import JSONResponse
 
 from app import db
 from app.config import settings
-from app.integrations import normalize_segments, verify_attendee_signature
+from app.integrations.attendee import verify_attendee_signature
+from app.integrations.transcript import normalize_segments
 from app.pipeline import attendee
 from app.schemas import MeetingStartRequest
 

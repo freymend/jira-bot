@@ -70,10 +70,13 @@ def init_db() -> None:
                 summary TEXT NOT NULL,
                 description TEXT NOT NULL,
                 owner_speaker TEXT,
+                owner_evidence_quote TEXT,
+                owner_timestamp_ms INTEGER,
                 due_date TEXT,
                 priority TEXT,
                 evidence_quote TEXT NOT NULL,
                 timestamp_ms INTEGER,
+                context_evidence_json TEXT NOT NULL DEFAULT '[]',
                 confidence REAL NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 jira_key TEXT,
@@ -108,6 +111,19 @@ def init_db() -> None:
         }
         if "bot_state" not in meeting_columns:
             connection.execute("ALTER TABLE meetings ADD COLUMN bot_state TEXT")
+        task_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(tasks)")
+        }
+        task_column_migrations = {
+            "owner_evidence_quote": "TEXT",
+            "owner_timestamp_ms": "INTEGER",
+            "context_evidence_json": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for column, declaration in task_column_migrations.items():
+            if column not in task_columns:
+                connection.execute(
+                    f"ALTER TABLE tasks ADD COLUMN {column} {declaration}"
+                )
         now = time.time()
         connection.execute(
             """INSERT OR IGNORE INTO background_jobs
@@ -414,23 +430,50 @@ def add_task(bot_id: str, task: dict[str, Any]) -> tuple[sqlite3.Row, bool]:
     with _connect() as connection:
         cursor = connection.execute(
             """INSERT OR IGNORE INTO tasks
-               (bot_id, fingerprint, summary, description, owner_speaker, due_date,
-                priority, evidence_quote, timestamp_ms, confidence)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (bot_id, fingerprint, summary, description, owner_speaker,
+                owner_evidence_quote, owner_timestamp_ms, due_date, priority,
+                evidence_quote, timestamp_ms, context_evidence_json, confidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 bot_id,
                 fingerprint,
                 task["summary"],
                 task.get("description", ""),
                 task.get("owner_speaker"),
+                task.get("owner_evidence_quote"),
+                task.get("owner_timestamp_ms"),
                 task.get("due_date"),
                 task.get("priority"),
                 task["evidence_quote"],
                 task.get("timestamp_ms"),
+                json.dumps(task.get("context_evidence", []), ensure_ascii=False),
                 task["confidence"],
             ),
         )
         inserted = cursor.rowcount == 1
+        if not inserted:
+            connection.execute(
+                """UPDATE tasks SET summary=?, description=?, owner_speaker=?,
+                   owner_evidence_quote=?, owner_timestamp_ms=?, due_date=?, priority=?,
+                   evidence_quote=?, timestamp_ms=?, context_evidence_json=?, confidence=?
+                   WHERE bot_id=? AND fingerprint=? AND jira_key IS NULL
+                     AND status IN ('pending', 'dry_run')""",
+                (
+                    task["summary"],
+                    task.get("description", ""),
+                    task.get("owner_speaker"),
+                    task.get("owner_evidence_quote"),
+                    task.get("owner_timestamp_ms"),
+                    task.get("due_date"),
+                    task.get("priority"),
+                    task["evidence_quote"],
+                    task.get("timestamp_ms"),
+                    json.dumps(task.get("context_evidence", []), ensure_ascii=False),
+                    task["confidence"],
+                    bot_id,
+                    fingerprint,
+                ),
+            )
         row = connection.execute(
             "SELECT * FROM tasks WHERE bot_id=? AND fingerprint=?",
             (bot_id, fingerprint),
@@ -457,10 +500,13 @@ def get_meeting(bot_id: str) -> dict[str, Any] | None:
             return None
         result = dict(meeting)
         result["transcript"] = json.loads(result.pop("transcript_json") or "null")
-        result["tasks"] = [
-            dict(row)
-            for row in connection.execute(
-                "SELECT * FROM tasks WHERE bot_id=? ORDER BY id", (bot_id,)
+        result["tasks"] = []
+        for row in connection.execute(
+            "SELECT * FROM tasks WHERE bot_id=? ORDER BY id", (bot_id,)
+        ):
+            task = dict(row)
+            task["context_evidence"] = json.loads(
+                task.pop("context_evidence_json", "[]") or "[]"
             )
-        ]
+            result["tasks"].append(task)
         return result

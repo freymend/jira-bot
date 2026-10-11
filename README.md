@@ -6,8 +6,8 @@ This service joins a Google Meet with a locally hosted Attendee bot. Attendee se
 
 1. `POST /meetings` creates an Attendee bot and configures `bot.state_change` and `transcript.update` callbacks.
 2. Attendee sends MP3 audio segments to the local MLX Whisper service through its `custom_async_v2` provider and emits signed transcript webhooks. Webhooks are verified and deduplicated; utterances are persisted as they arrive.
-3. On `post_processing_completed`, the API atomically records the signed webhook and a finalization job in SQLite. A separate worker fetches the canonical locally generated transcript from Attendee and runs chunked task extraction. Duplicate webhook deliveries are ignored.
-4. High-confidence tasks with a verbatim transcript quote are saved. Jira issue creation is attempted only when dry-run is disabled and Jira credentials are configured.
+3. On `post_processing_completed`, the API atomically records the signed webhook and a finalization job in SQLite. A separate worker fetches the canonical locally generated transcript from Attendee and extracts task proposals in chunks. For each proposal, Gemma reviews a bounded time window and transcript-wide keyword matches to add relevant background and cite the source excerpts. Duplicate webhook deliveries are ignored.
+4. High-confidence tasks with a verified task quote are saved alongside separate assignment evidence and contextual transcript excerpts. Jira issue creation is attempted only when dry-run is disabled and Jira credentials are configured.
 
 Attendee owns the meeting-bot lifecycle and audio capture. This service's API is the Jira assistant's workflow API: it delegates bot operations to Attendee, receives callbacks, and coordinates task extraction and Jira issue creation.
 
@@ -31,14 +31,15 @@ sequenceDiagram
     API->>Queue: Persist webhook and finalization job atomically
     Worker->>Queue: Claim job and renew lease
     Worker->>Attendee: Fetch final transcript
-    Worker->>Gemma: Extract task proposals
+    Worker->>Gemma: Extract task proposals from transcript chunks
+    Worker->>Gemma: Enrich proposals with related excerpts
     opt Jira creation enabled
       Worker->>Jira: Create issues
     end
     Client->>API: Check status, leave, or reprocess
 ```
 
-The transcript, extracted-task records, and durable job queue are stored in SQLite at `DATABASE_PATH`, shared by the API and worker. Jobs are leased, retried with backoff up to five attempts, and reclaimed after a worker stops renewing its lease. This protects work across process and container restarts on the same host; it is not a substitute for off-host backups or a replicated production database. The transcript is sent to the configured local OpenAI-compatible model endpoint. Jira receives accepted task fields, evidence quotes, and the meeting link when issue creation is enabled.
+The transcript, extracted-task records, cited context excerpts, and durable job queue are stored in SQLite at `DATABASE_PATH`, shared by the API and worker. Jobs are leased, retried with backoff up to five attempts, and reclaimed after a worker stops renewing its lease. This protects work across process and container restarts on the same host; it is not a substitute for off-host backups or a replicated production database. The transcript is sent to the configured local OpenAI-compatible model endpoint. Jira receives accepted task fields, a context-rich description, separate task and assignment quotes, cited transcript excerpts, and the meeting link when issue creation is enabled.
 
 ## Requirements and setup
 
@@ -135,11 +136,11 @@ curl http://127.0.0.1:5005/meetings/BOT_ID \
 
 Other endpoints are `POST /meetings/{bot_id}/leave` and `POST /meetings/{bot_id}/reprocess`. Reprocessing now enqueues durable work rather than running inside the API request process; completed meetings return HTTP 409, while dry-run and failed meetings can be queued again.
 
-The meeting status endpoint includes the Attendee bot state, pipeline status, final transcript, and task proposals. A meeting in `dry_run` can be reprocessed after changing `JIRA_DRY_RUN` to `false` and restarting the API.
+The meeting status endpoint includes the Attendee bot state, pipeline status, final transcript, and task proposals. Each proposal includes a context-rich description, separate task and assignment quotes, and selected transcript excerpts with speaker names and timestamps. A meeting in `dry_run` can be reprocessed after changing `JIRA_DRY_RUN` to `false` and restarting the API.
 
 ## Jira configuration
 
-Keep `JIRA_DRY_RUN=true` while evaluating proposals. Once validated, configure the Jira site, email, API token, project key, and issue type, then set `JIRA_DRY_RUN=false` and restart the service. Only `Zachary` or `Zac` can be assigned, and only when that exact name is spoken in the task's evidence quote and identifies who accepted it. Speaker labels, pronouns, and inferred identity do not qualify. `JIRA_SPEAKER_ACCOUNT_IDS` maps either eligible name to a Jira account ID; other owners remain unassigned. `JIRA_PRIORITY_MAP` maps model priority labels to Jira priority names. Due dates are included only when the model extracts a specific ISO date.
+Keep `JIRA_DRY_RUN=true` while evaluating proposals. Once validated, configure the Jira site, email, API token, project key, and issue type, then set `JIRA_DRY_RUN=false` and restart the service. Only `Zachary` or `Zac` can be assigned, and only when that exact name is spoken in the assignment evidence and the utterance identifies who accepted the task. Speaker labels, pronouns, and inferred identity do not qualify. `JIRA_SPEAKER_ACCOUNT_IDS` maps either eligible name to a Jira account ID; other owners remain unassigned. `JIRA_PRIORITY_MAP` maps model priority labels to Jira priority names. Due dates are included only when the model extracts a specific ISO date.
 
 An issue-creation request that fails is recorded as `uncertain` so a retry does not accidentally create a duplicate issue. Inspect the meeting record and Jira before manually retrying an uncertain proposal.
 

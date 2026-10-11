@@ -5,12 +5,10 @@ from typing import Any
 
 from app import db
 from app.config import settings
-from app.integrations import (
-    AttendeeClient,
-    JiraClient,
-    extract_tasks,
-    normalize_segments,
-)
+from app.integrations.attendee import AttendeeClient
+from app.integrations.jira import JiraClient
+from app.integrations.task_extraction import extract_tasks
+from app.integrations.transcript import normalize_segments
 
 logger = logging.getLogger("jira-bot.pipeline")
 attendee = AttendeeClient()
@@ -30,7 +28,7 @@ async def finalize_meeting(bot_id: str) -> None:
         transcript_text = "\n".join(segment["text"] for segment in segments).casefold()
         approved: list[dict[str, Any]] = []
         for proposal in proposals.tasks:
-            item = proposal.model_dump(mode="json")
+            item = proposal.model_dump(mode="json", exclude={"context_query"})
             if proposal.confidence < settings.llm_confidence_threshold:
                 continue
             if proposal.evidence_quote.casefold() not in transcript_text:
