@@ -500,6 +500,40 @@ class JiraScreenShareEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"screenshare-frame-9-15.jpg", requests[1].content)
         self.assertIn(b"\xff\xd8image\xff\xd9", requests[1].content)
 
+    async def test_jira_rejection_logs_structured_error_details(self) -> None:
+        async def handle(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={
+                    "errorMessages": [],
+                    "errors": {"duedate": "Invalid date format"},
+                },
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        configuration = replace(
+            settings,
+            jira_base_url="https://jira.example",
+            jira_email="bot@example.test",
+            jira_api_token="jira-token",
+            jira_project_key="TEST",
+        )
+        task = {
+            "summary": "Update checkout page",
+            "evidence_quote": "I will update the checkout page.",
+        }
+        with (
+            patch("app.integrations.jira.settings", configuration),
+            patch("app.integrations.jira.httpx.AsyncClient", return_value=client),
+            self.assertLogs("jira-bot.jira", level="ERROR") as captured,
+        ):
+            with self.assertRaises(httpx.HTTPStatusError):
+                await JiraClient().create_issue(task, None)
+
+        self.assertIn("HTTP 400", captured.output[0])
+        self.assertIn("duedate", captured.output[0])
+        self.assertIn("Invalid date format", captured.output[0])
+
 
 if __name__ == "__main__":
     unittest.main()

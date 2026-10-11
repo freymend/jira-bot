@@ -30,6 +30,24 @@ def _timestamp_label(value: Any) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+def _jira_error_details(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return "No structured error details returned."
+    if not isinstance(payload, dict):
+        return "No structured error details returned."
+
+    details = []
+    messages = payload.get("errorMessages")
+    errors = payload.get("errors")
+    if isinstance(messages, list) and messages:
+        details.append(f"errorMessages={messages!r}")
+    if isinstance(errors, dict) and errors:
+        details.append(f"errors={errors!r}")
+    return "; ".join(details) or "No structured error details returned."
+
+
 class JiraClient:
     async def create_issue(
         self,
@@ -125,7 +143,15 @@ class JiraClient:
                 f"{settings.jira_base_url}/rest/api/3/issue",
                 json={"fields": fields},
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError:
+                logger.error(
+                    "Jira issue creation failed (HTTP %s): %s",
+                    response.status_code,
+                    _jira_error_details(response),
+                )
+                raise
             issue_key = response.json()["key"]
             if settings.jira_attach_screenshare_evidence:
                 for frame in screen_frames or []:
