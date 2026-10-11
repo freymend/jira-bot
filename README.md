@@ -110,4 +110,4 @@ An issue-creation request that fails is recorded as `uncertain` so a retry does 
 
 ## Current scope
 
-This first slice supports manually submitted Google Meet URLs. Calendar discovery, automatic meeting scheduling, a review UI, and transcript retention controls are follow-up work.
+See [plan.md](./plan.md) for the development roadmap.
