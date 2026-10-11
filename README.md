@@ -5,8 +5,8 @@ This service joins a Google Meet with a locally hosted Attendee bot. Attendee se
 ## Pipeline
 
 1. `POST /meetings` creates an Attendee bot and configures `bot.state_change` and `transcript.update` callbacks.
-2. Attendee sends raw audio segments to the local MLX Whisper service through its `custom_async_v2` provider and emits signed transcript webhooks. Webhooks are verified and deduplicated; utterances are persisted as they arrive.
-3. On `post_processing_completed`, the service fetches the canonical locally generated transcript from Attendee and runs chunked task extraction. Duplicate webhook deliveries are ignored.
+2. Attendee sends MP3 audio segments to the local MLX Whisper service through its `custom_async_v2` provider and emits signed transcript webhooks. Webhooks are verified and deduplicated; utterances are persisted as they arrive.
+3. On `post_processing_completed`, the API atomically records the signed webhook and a finalization job in SQLite. A separate worker fetches the canonical locally generated transcript from Attendee and runs chunked task extraction. Duplicate webhook deliveries are ignored.
 4. High-confidence tasks with a verbatim transcript quote are saved. Jira issue creation is attempted only when dry-run is disabled and Jira credentials are configured.
 
 Attendee owns the meeting-bot lifecycle and audio capture. This service's API is the Jira assistant's workflow API: it delegates bot operations to Attendee, receives callbacks, and coordinates task extraction and Jira issue creation.
@@ -16,6 +16,8 @@ sequenceDiagram
     actor Client
     participant API as Jira assistant API
     participant Attendee as Attendee API and worker
+    participant Queue as Durable SQLite job queue
+    participant Worker as Finalization worker
     participant Meet as Google Meet
     participant Whisper as MLX Whisper
     participant Gemma
@@ -26,20 +28,22 @@ sequenceDiagram
     Attendee->>Meet: Join meeting and capture audio
     Attendee->>Whisper: Send audio for transcription
     Attendee-->>API: Signed state and transcript webhooks
-    API->>Attendee: Fetch final transcript
-    API->>Gemma: Extract task proposals
+    API->>Queue: Persist webhook and finalization job atomically
+    Worker->>Queue: Claim job and renew lease
+    Worker->>Attendee: Fetch final transcript
+    Worker->>Gemma: Extract task proposals
     opt Jira creation enabled
-        API->>Jira: Create issues
+      Worker->>Jira: Create issues
     end
     Client->>API: Check status, leave, or reprocess
 ```
 
-The transcript and extracted-task records are stored locally in SQLite at `DATABASE_PATH`. The transcript is sent to the configured local OpenAI-compatible model endpoint. Jira receives accepted task fields, evidence quotes, and the meeting link when issue creation is enabled.
+The transcript, extracted-task records, and durable job queue are stored in SQLite at `DATABASE_PATH`, shared by the API and worker. Jobs are leased, retried with backoff up to five attempts, and reclaimed after a worker stops renewing its lease. This protects work across process and container restarts on the same host; it is not a substitute for off-host backups or a replicated production database. The transcript is sent to the configured local OpenAI-compatible model endpoint. Jira receives accepted task fields, evidence quotes, and the meeting link when issue creation is enabled.
 
 ## Requirements and setup
 
 - macOS 15 or later on Apple Silicon.
-- Docker Desktop with Docker Compose v2.20.3 or later. Compose runs the API and Attendee development stack together; the API image uses Python 3.14 and locked dependencies.
+- Docker Desktop with Docker Compose v2.20.3 or later. Compose runs the API, durable-job worker, and Attendee development stack together; the API image uses Python 3.14 and locked dependencies.
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) for local development.
 - vLLM-Metal installed in its managed native arm64 Python 3.12 environment.
 - The MLX Whisper transcriber runs natively on Apple Silicon with Python 3.14 and `ffmpeg`.
@@ -57,7 +61,7 @@ Project dependencies are declared in `pyproject.toml`; `uv.lock` records the res
 
 ## Configure Attendee locally
 
-Attendee's upstream development stack is included in this project's Compose configuration. The API, Attendee API, worker, scheduler, Postgres, Redis, and RustFS recording storage start and stop together. The API reaches Attendee over the Compose network; Attendee's API and worker both receive the custom transcription URL, and the worker sends raw PCM audio to MLX Whisper on the Mac at `host.docker.internal:8101/transcribe`. Gemma uses port `8100`.
+Attendee's upstream development stack is included in this project's Compose configuration. The API, Attendee API, worker, scheduler, Postgres, Redis, and RustFS recording storage start and stop together. The API reaches Attendee over the Compose network; Attendee's API and worker both receive the custom transcription URL, and the worker sends MP3 audio segments to MLX Whisper on the Mac at `host.docker.internal:8101/transcribe`. MLX Whisper uses `ffmpeg` to decode and resample each segment. Gemma uses port `8100`.
 
 The local Compose override adds `attendee-app-local` to Attendee's Django `ALLOWED_HOSTS`, so requests from the API container are accepted by Django.
 
@@ -95,6 +99,8 @@ source ~/.venv-vllm-metal/bin/activate
 uv run --no-active --group dev python scripts/dev.py up
 ```
 
+After changing the local transcriber code, restart only MLX Whisper with `uv run --no-active --group dev python scripts/dev.py restart-whisper`; this leaves the meeting bot and the other services running.
+
 Apply Attendee's migrations, then create its local account:
 
 ```sh
@@ -107,7 +113,9 @@ The API is available from the host at `http://127.0.0.1:5005`; local Attendee ca
 
 ## API
 
-All management routes require `Authorization: Bearer $APP_API_TOKEN`. `/health` and the signed webhook endpoint are exempt.
+All management routes require `Authorization: Bearer $APP_API_TOKEN`. The health endpoints and signed webhook endpoint are exempt.
+
+`GET /health` is a readiness check: it returns HTTP 503 if SQLite is unavailable or the worker heartbeat is stale. `GET /health/live` only reports whether the API process is responding. The API and job worker run as UID 65532 with read-only root filesystems, a writable `/tmp`, all Linux capabilities dropped, `no-new-privileges`, and limits of 1 CPU, 1 GiB memory, and 128 PIDs. Attendee's API, worker, and scheduler also drop capabilities and run with `no-new-privileges`; Compose bounds those services, Postgres, Redis, RustFS, and the optional webpage streamer. These are local development budgets—tune them against production workload measurements. Native Whisper and Gemma are host processes and are not constrained by Compose.
 
 Create a meeting bot:
 
@@ -125,7 +133,7 @@ curl http://127.0.0.1:5005/meetings/BOT_ID \
   -H 'Authorization: Bearer YOUR_APP_API_TOKEN'
 ```
 
-Other endpoints are `POST /meetings/{bot_id}/leave` and `POST /meetings/{bot_id}/reprocess`.
+Other endpoints are `POST /meetings/{bot_id}/leave` and `POST /meetings/{bot_id}/reprocess`. Reprocessing now enqueues durable work rather than running inside the API request process; completed meetings return HTTP 409, while dry-run and failed meetings can be queued again.
 
 The meeting status endpoint includes the Attendee bot state, pipeline status, final transcript, and task proposals. A meeting in `dry_run` can be reprocessed after changing `JIRA_DRY_RUN` to `false` and restarting the API.
 

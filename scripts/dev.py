@@ -112,49 +112,64 @@ def _start_native_service(
         _wait_until_ready(name, health_url, process.pid, log)
 
 
-def _stop_native_services() -> None:
-    for name in ("gemma", "mlx-whisper"):
-        pid_file = STATE_ROOT / f"{name}.pid"
-        if not pid_file.exists():
-            continue
+def _stop_native_service(name: str) -> None:
+    pid_file = STATE_ROOT / f"{name}.pid"
+    if not pid_file.exists():
+        return
+    try:
+        pid = int(pid_file.read_text().strip())
+    except ValueError:
+        pid = -1
+    if pid > 0 and _process_exists(pid) and _pid_matches_service(pid, name):
+        print(f"Stopping managed {name} process ({pid}).")
         try:
-            pid = int(pid_file.read_text().strip())
-        except ValueError:
-            pid = -1
-        if (
-            pid > 0
-            and _process_exists(pid)
-            and _pid_matches_service(pid, name)
-        ):
-            print(f"Stopping managed {name} process ({pid}).")
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pid_file.unlink(missing_ok=True)
+            return
+        except PermissionError as exc:
+            print(
+                f"Could not stop {name} process ({pid}): {exc}. "
+                "Leaving it running and retaining its PID file.",
+                file=sys.stderr,
+            )
+            return
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and _process_exists(pid):
+            time.sleep(0.2)
+        if _process_exists(pid):
             try:
-                os.killpg(pid, signal.SIGTERM)
+                os.killpg(pid, signal.SIGKILL)
             except ProcessLookupError:
-                pid_file.unlink(missing_ok=True)
-                continue
+                pass
             except PermissionError as exc:
                 print(
-                    f"Could not stop {name} process ({pid}): {exc}. "
+                    f"Could not force-stop {name} process ({pid}): {exc}. "
                     "Leaving it running and retaining its PID file.",
                     file=sys.stderr,
                 )
-                continue
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline and _process_exists(pid):
-                time.sleep(0.2)
-            if _process_exists(pid):
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                except PermissionError as exc:
-                    print(
-                        f"Could not force-stop {name} process ({pid}): {exc}. "
-                        "Leaving it running and retaining its PID file.",
-                        file=sys.stderr,
-                    )
-                    continue
-        pid_file.unlink(missing_ok=True)
+                return
+    pid_file.unlink(missing_ok=True)
+
+
+def _stop_native_services() -> None:
+    for name in ("gemma", "mlx-whisper"):
+        _stop_native_service(name)
+
+
+def _whisper_command() -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "mlx_transcriber.main:app",
+        "--env-file",
+        str(ROOT / ".env"),
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8101",
+    ]
 
 
 def _require_setup() -> None:
@@ -192,18 +207,7 @@ def _compose(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]
 
 def up() -> None:
     _require_setup()
-    whisper_command = [
-        sys.executable,
-        "-m",
-        "uvicorn",
-        "mlx_transcriber.main:app",
-        "--env-file",
-        str(ROOT / ".env"),
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8101",
-    ]
+    whisper_command = _whisper_command()
     model = _setting("LLM_MODEL", "mlx-community/gemma-4-e4b-it-4bit")
     vllm = shutil.which("vllm")
     try:
@@ -237,6 +241,19 @@ def up() -> None:
     print("Native model logs: .dev-run/mlx-whisper.log and .dev-run/gemma.log")
 
 
+def restart_whisper() -> None:
+    _require_setup()
+    health_url = "http://127.0.0.1:8101/health"
+    _stop_native_service("mlx-whisper")
+    if _is_ready(health_url):
+        raise RuntimeError(
+            "MLX Whisper is running without a managed process ID; stop it manually "
+            "before restarting it."
+        )
+    _start_native_service("mlx-whisper", _whisper_command(), ROOT, health_url)
+    print("MLX Whisper restarted.")
+
+
 def down() -> None:
     try:
         _compose("down", check=False)
@@ -246,11 +263,13 @@ def down() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the local meeting assistant stack")
-    parser.add_argument("command", choices=("up", "down"))
+    parser.add_argument("command", choices=("up", "down", "restart-whisper"))
     args = parser.parse_args()
     try:
         if args.command == "up":
             up()
+        elif args.command == "restart-whisper":
+            restart_whisper()
         else:
             down()
     except (OSError, RuntimeError, subprocess.CalledProcessError, TimeoutError) as exc:

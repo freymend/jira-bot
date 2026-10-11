@@ -7,6 +7,7 @@ include:
 services:
   attendee-storage:
     image: ghcr.io/rustfs/rustfs:1.0.1
+    restart: unless-stopped
     environment:
       RUSTFS_ACCESS_KEY: ATTENDEELOCAL
       RUSTFS_SECRET_KEY: attendee-local-development
@@ -21,6 +22,11 @@ services:
       - attendee_storage_data:/data
     networks:
       - attendee_network
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
       interval: 10s
@@ -46,6 +52,11 @@ services:
         /usr/bin/rc bucket create local/attendee-recordings
     networks:
       - attendee_network
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
 
   api:
     build: .
@@ -61,12 +72,62 @@ services:
     depends_on:
       attendee-app-local:
         condition: service_started
+      worker:
+        condition: service_healthy
     ports:
       - "127.0.0.1:${APP_PORT:-5005}:5005"
     volumes:
       - jira_bot_data:/app/data
     networks:
       - attendee_network
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  worker:
+    build: .
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command: ["/app/.venv/bin/python", "-m", "app.worker"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/jira_bot.sqlite3
+      ATTENDEE_API_BASE: http://attendee-app-local:8000/api/v1
+      LLM_BASE_URL: ${LLM_BASE_URL_DOCKER:-http://host.docker.internal:8100/v1}
+    depends_on:
+      attendee-app-local:
+        condition: service_started
+    volumes:
+      - jira_bot_data:/app/data
+    networks:
+      - attendee_network
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -c
+        - from app.db import health_checks; checks = health_checks(); raise SystemExit(0 if checks["database"] and checks["worker"] else 1)
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 volumes:
   jira_bot_data:

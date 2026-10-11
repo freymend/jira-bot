@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from app import db
+from app.config import settings
+from app.integrations import (
+    AttendeeClient,
+    JiraClient,
+    extract_tasks,
+    normalize_segments,
+)
+
+logger = logging.getLogger("jira-bot.pipeline")
+attendee = AttendeeClient()
+jira = JiraClient()
+
+
+async def finalize_meeting(bot_id: str) -> None:
+    db.set_meeting_status(bot_id, "processing")
+    try:
+        transcript_response = await attendee.get_transcript(bot_id)
+        segments = normalize_segments(transcript_response)
+        if not segments:
+            raise RuntimeError("Attendee returned an empty transcript")
+        db.save_final_transcript(bot_id, segments)
+        meeting = db.get_meeting(bot_id) or {}
+        proposals = await extract_tasks(segments)
+        transcript_text = "\n".join(segment["text"] for segment in segments).casefold()
+        approved: list[dict[str, Any]] = []
+        for proposal in proposals.tasks:
+            item = proposal.model_dump(mode="json")
+            if proposal.confidence < settings.llm_confidence_threshold:
+                continue
+            if proposal.evidence_quote.casefold() not in transcript_text:
+                logger.warning(
+                    "Ignoring task without verifiable transcript evidence for %s",
+                    bot_id,
+                )
+                continue
+            approved.append(item)
+
+        has_jira_error = False
+        for item in approved:
+            row, inserted = db.add_task(bot_id, item)
+            if row["jira_key"]:
+                continue
+            if (
+                not settings.jira_dry_run
+                and not inserted
+                and row["status"] in {"creating", "uncertain", "created"}
+            ):
+                # An interrupted Jira request may have succeeded; avoid duplicates.
+                if row["status"] == "creating":
+                    db.set_task_status(
+                        row["id"],
+                        "uncertain",
+                        error="Issue creation was interrupted; verify Jira before retrying.",
+                    )
+                has_jira_error = True
+                continue
+            if settings.jira_dry_run:
+                db.set_task_status(row["id"], "dry_run")
+                continue
+
+            db.set_task_status(row["id"], "creating")
+            try:
+                key = await jira.create_issue(item, meeting.get("meeting_url"))
+                db.set_task_status(row["id"], "created", jira_key=key)
+            except Exception as exc:
+                has_jira_error = True
+                db.set_task_status(row["id"], "uncertain", error=str(exc)[:1000])
+                logger.exception("Jira issue creation failed for bot %s", bot_id)
+
+        status = (
+            "error"
+            if has_jira_error
+            else ("dry_run" if settings.jira_dry_run else "completed")
+        )
+        db.set_meeting_status(bot_id, status)
+    except Exception as exc:
+        db.set_meeting_status(bot_id, "error", str(exc)[:1000])
+        raise

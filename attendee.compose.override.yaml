@@ -13,6 +13,11 @@ services:
     depends_on:
       attendee-storage-init:
         condition: service_completed_successfully
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
 
   attendee-worker-local:
     environment:
@@ -26,6 +31,11 @@ services:
     depends_on:
       attendee-storage-init:
         condition: service_completed_successfully
+    cpus: 2.0
+    mem_limit: 2g
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
 
   attendee-scheduler-local:
     environment:
@@ -37,3 +47,23 @@ services:
     depends_on:
       attendee-storage-init:
         condition: service_completed_successfully
+    cpus: 0.5
+    mem_limit: 512m
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  attendee-webpage-streamer-local:
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 256
+
+  postgres:
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 128
+
+  redis:
+    cpus: 0.5
+    mem_limit: 512m
+    pids_limit: 64

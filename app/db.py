@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -14,14 +17,19 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect() -> Generator[sqlite3.Connection, None, None]:
     path = Path(settings.database_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=30)
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA foreign_keys=ON")
-    return connection
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA foreign_keys=ON")
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def init_db() -> None:
@@ -72,6 +80,26 @@ def init_db() -> None:
                 error TEXT,
                 UNIQUE (bot_id, fingerprint)
             );
+            CREATE TABLE IF NOT EXISTS background_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                bot_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                available_at REAL NOT NULL,
+                lease_until REAL,
+                locked_by TEXT,
+                last_error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE (kind, bot_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_background_jobs_ready
+                ON background_jobs(status, available_at, lease_until);
+            CREATE TABLE IF NOT EXISTS worker_heartbeats (
+                worker_id TEXT PRIMARY KEY,
+                heartbeat_at REAL NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_tasks_bot_id ON tasks(bot_id);
             """
         )
@@ -80,15 +108,13 @@ def init_db() -> None:
         }
         if "bot_state" not in meeting_columns:
             connection.execute("ALTER TABLE meetings ADD COLUMN bot_state TEXT")
+        now = time.time()
         connection.execute(
-            """UPDATE meetings SET status='error',
-                 error=COALESCE(error, 'Previous processing attempt was interrupted')
-               WHERE status='processing'"""
-        )
-        connection.execute(
-            """UPDATE tasks SET status='uncertain',
-                 error=COALESCE(error, 'Issue creation may have been interrupted')
-               WHERE status='creating'"""
+            """INSERT OR IGNORE INTO background_jobs
+               (kind, bot_id, status, attempts, available_at, created_at, updated_at)
+               SELECT 'finalize_meeting', bot_id, 'queued', 0, ?, ?, ?
+               FROM meetings WHERE status='processing'""",
+            (now, now, now),
         )
 
 
@@ -114,17 +140,40 @@ def update_bot_state(bot_id: str, bot_state: str) -> None:
 
 
 def record_webhook(
-    event_id: str, bot_id: str, trigger: str, payload: dict[str, Any]
+    event_id: str,
+    bot_id: str,
+    trigger: str,
+    payload: dict[str, Any],
+    *,
+    enqueue_finalization: bool = False,
 ) -> bool:
     with _connect() as connection:
         result = connection.execute(
             "INSERT OR IGNORE INTO webhook_events VALUES (?, ?, ?, ?, ?)",
-            (event_id, bot_id, trigger, _now(), json.dumps(payload, ensure_ascii=False)),
+            (
+                event_id,
+                bot_id,
+                trigger,
+                _now(),
+                json.dumps(payload, ensure_ascii=False),
+            ),
         )
         connection.execute(
             "INSERT OR IGNORE INTO meetings(bot_id, created_at) VALUES (?, ?)",
             (bot_id, _now()),
         )
+        if result.rowcount == 1 and enqueue_finalization:
+            meeting = connection.execute(
+                "SELECT status FROM meetings WHERE bot_id=?", (bot_id,)
+            ).fetchone()
+            if meeting is not None and meeting["status"] != "completed":
+                now = time.time()
+                connection.execute(
+                    """INSERT OR IGNORE INTO background_jobs
+                       (kind, bot_id, status, attempts, available_at, created_at, updated_at)
+                       VALUES ('finalize_meeting', ?, 'queued', 0, ?, ?, ?)""",
+                    (bot_id, now, now, now),
+                )
         return result.rowcount == 1
 
 
@@ -179,14 +228,170 @@ def save_final_transcript(bot_id: str, segments: list[dict[str, Any]]) -> None:
     save_segments(bot_id, segments)
 
 
-def claim_finalization(bot_id: str) -> bool:
+def enqueue_finalization(bot_id: str, *, allow_reprocess: bool = False) -> str:
+    now = time.time()
+    with _connect() as connection:
+        meeting = connection.execute(
+            "SELECT status FROM meetings WHERE bot_id=?", (bot_id,)
+        ).fetchone()
+        if meeting is None:
+            return "not_found"
+        if meeting["status"] == "completed":
+            return "completed"
+
+        connection.execute(
+            """INSERT OR IGNORE INTO background_jobs
+               (kind, bot_id, status, attempts, available_at, created_at, updated_at)
+               VALUES ('finalize_meeting', ?, 'queued', 0, ?, ?, ?)""",
+            (bot_id, now, now, now),
+        )
+        job = connection.execute(
+            "SELECT status FROM background_jobs WHERE kind='finalize_meeting' AND bot_id=?",
+            (bot_id,),
+        ).fetchone()
+        if job is None:
+            return "queued"
+
+        status = str(job["status"])
+        if allow_reprocess and status in {"completed", "failed"}:
+            connection.execute(
+                """UPDATE background_jobs SET status='queued', attempts=0,
+                     available_at=?, lease_until=NULL, locked_by=NULL, last_error=NULL,
+                     updated_at=? WHERE kind='finalize_meeting' AND bot_id=?""",
+                (now, now, bot_id),
+            )
+            return "queued"
+        return "processing" if status == "running" else status
+
+
+def claim_next_job(
+    worker_id: str, *, lease_seconds: int = 60, max_attempts: int = 5
+) -> dict[str, Any] | None:
+    now = time.time()
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        expired = connection.execute(
+            """SELECT id, bot_id FROM background_jobs
+               WHERE status='running' AND lease_until <= ? AND attempts >= ?""",
+            (now, max_attempts),
+        ).fetchall()
+        for row in expired:
+            error = "Worker lease expired after the maximum number of attempts."
+            updated = connection.execute(
+                """UPDATE background_jobs SET status='failed', lease_until=NULL,
+                     locked_by=NULL, last_error=?, updated_at=?
+                   WHERE id=? AND status='running' AND lease_until <= ? AND attempts >= ?""",
+                (error, now, row["id"], now, max_attempts),
+            )
+            if updated.rowcount == 1:
+                connection.execute(
+                    "UPDATE meetings SET status='error', error=? WHERE bot_id=?",
+                    (error, row["bot_id"]),
+                )
+        row = connection.execute(
+            """SELECT id FROM background_jobs
+               WHERE available_at <= ?
+                 AND (status='queued' OR
+                      (status='running' AND lease_until <= ? AND attempts < ?))
+               ORDER BY available_at, id LIMIT 1""",
+            (now, now, max_attempts),
+        ).fetchone()
+        if row is None:
+            return None
+        job_id = int(row["id"])
+        connection.execute(
+            """UPDATE background_jobs SET status='running', attempts=attempts+1,
+                 lease_until=?, locked_by=?, updated_at=? WHERE id=?""",
+            (now + lease_seconds, worker_id, now, job_id),
+        )
+        claimed = connection.execute(
+            "SELECT * FROM background_jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        return dict(claimed) if claimed is not None else None
+
+
+def renew_job_lease(job_id: int, worker_id: str, *, lease_seconds: int = 60) -> bool:
+    now = time.time()
     with _connect() as connection:
         result = connection.execute(
-            """UPDATE meetings SET status='processing', error=NULL
-               WHERE bot_id=? AND status NOT IN ('processing', 'completed')""",
-            (bot_id,),
+            """UPDATE background_jobs SET lease_until=?, updated_at=?
+               WHERE id=? AND status='running' AND locked_by=?""",
+            (now + lease_seconds, now, job_id, worker_id),
+        )
+        connection.execute(
+            """INSERT INTO worker_heartbeats(worker_id, heartbeat_at) VALUES (?, ?)
+               ON CONFLICT(worker_id) DO UPDATE SET heartbeat_at=excluded.heartbeat_at""",
+            (worker_id, now),
         )
         return result.rowcount == 1
+
+
+def record_worker_heartbeat(worker_id: str) -> None:
+    with _connect() as connection:
+        connection.execute(
+            """INSERT INTO worker_heartbeats(worker_id, heartbeat_at) VALUES (?, ?)
+               ON CONFLICT(worker_id) DO UPDATE SET heartbeat_at=excluded.heartbeat_at""",
+            (worker_id, time.time()),
+        )
+
+
+def health_checks(*, worker_stale_after_seconds: int = 30) -> dict[str, bool]:
+    try:
+        with _connect() as connection:
+            connection.execute("SELECT 1").fetchone()
+            connection.execute("SELECT COUNT(*) FROM background_jobs").fetchone()
+            heartbeat = connection.execute(
+                "SELECT MAX(heartbeat_at) AS latest FROM worker_heartbeats"
+            ).fetchone()
+    except OSError, sqlite3.Error:
+        return {"database": False, "worker": False}
+
+    latest = heartbeat["latest"] if heartbeat is not None else None
+    return {
+        "database": True,
+        "worker": latest is not None
+        and latest >= time.time() - worker_stale_after_seconds,
+    }
+
+
+def finish_job(job_id: int, worker_id: str) -> bool:
+    with _connect() as connection:
+        result = connection.execute(
+            """UPDATE background_jobs SET status='completed', lease_until=NULL,
+                 locked_by=NULL, last_error=NULL, updated_at=?
+               WHERE id=? AND status='running' AND locked_by=?""",
+            (time.time(), job_id, worker_id),
+        )
+        return result.rowcount == 1
+
+
+def fail_job(
+    job_id: int,
+    worker_id: str,
+    error: str,
+    *,
+    attempts: int,
+    max_attempts: int = 5,
+) -> str:
+    now = time.time()
+    is_terminal = attempts >= max_attempts
+    delay = min(5 * (2 ** max(attempts - 1, 0)), 300)
+    status = "failed" if is_terminal else "queued"
+    with _connect() as connection:
+        connection.execute(
+            """UPDATE background_jobs SET status=?, available_at=?, lease_until=NULL,
+                 locked_by=NULL, last_error=?, updated_at=?
+               WHERE id=? AND status='running' AND locked_by=?""",
+            (
+                status,
+                now if is_terminal else now + delay,
+                error[:1000],
+                now,
+                job_id,
+                worker_id,
+            ),
+        )
+    return status
 
 
 def set_meeting_status(bot_id: str, status: str, error: str | None = None) -> None:
