@@ -9,6 +9,31 @@ This service joins a Google Meet with a locally hosted Attendee bot. Attendee se
 3. On `post_processing_completed`, the service fetches the canonical locally generated transcript from Attendee and runs chunked task extraction. Duplicate webhook deliveries are ignored.
 4. High-confidence tasks with a verbatim transcript quote are saved. Jira issue creation is attempted only when dry-run is disabled and Jira credentials are configured.
 
+Attendee owns the meeting-bot lifecycle and audio capture. This service's API is the Jira assistant's workflow API: it delegates bot operations to Attendee, receives callbacks, and coordinates task extraction and Jira issue creation.
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant API as Jira assistant API
+    participant Attendee as Attendee API and worker
+    participant Meet as Google Meet
+    participant Whisper as MLX Whisper
+    participant Gemma
+    participant Jira as Jira Cloud
+
+    Client->>API: POST /meetings
+    API->>Attendee: Create bot with callback settings
+    Attendee->>Meet: Join meeting and capture audio
+    Attendee->>Whisper: Send audio for transcription
+    Attendee-->>API: Signed state and transcript webhooks
+    API->>Attendee: Fetch final transcript
+    API->>Gemma: Extract task proposals
+    opt Jira creation enabled
+        API->>Jira: Create issues
+    end
+    Client->>API: Check status, leave, or reprocess
+```
+
 The transcript and extracted-task records are stored locally in SQLite at `DATABASE_PATH`. The transcript is sent to the configured local OpenAI-compatible model endpoint. Jira receives accepted task fields, evidence quotes, and the meeting link when issue creation is enabled.
 
 ## Requirements and setup
@@ -21,7 +46,7 @@ The transcript and extracted-task records are stored locally in SQLite at `DATAB
 - The Attendee source checkout at `../attendee`. Recording storage runs in local RustFS; AWS credentials are not needed.
 - An Attendee API key and webhook secret created in the local Attendee instance.
 - A long random `MLX_TRANSCRIBER_API_KEY`, shared by the API and the local transcriber.
-- A public HTTPS URL for Attendee callbacks (for local development, use a tunnel such as ngrok).
+- No public callback URL is needed with the local Attendee stack; it reaches the API at `http://api:5005` over the shared Compose network. The local Compose override permits this internal HTTP callback. Use a public HTTPS tunnel only when connecting to a hosted Attendee instance.
 - Jira Cloud API credentials only when enabling issue creation.
 
 ```sh
@@ -59,7 +84,7 @@ curl -fsSL https://raw.githubusercontent.com/vllm-project/vllm-metal/main/instal
 
 See the [vLLM-Metal installation guide](https://docs.vllm.ai/projects/vllm-metal/en/stable/installation/) for platform requirements and the [supported-model list](https://docs.vllm.ai/projects/vllm-metal/en/stable/supported_models/) for Gemma 4 support.
 
-Set `APP_PUBLIC_URL` to the HTTPS tunnel URL and choose a long random `APP_API_TOKEN`. Docker Compose passes `.env` to the API container at runtime; it is excluded from the image build. The API's SQLite database is stored in a persistent Docker volume. The first Whisper transcription downloads the model selected by `MLX_WHISPER_MODEL`; it defaults to `mlx-community/whisper-turbo`.
+For the local Attendee stack, set `APP_PUBLIC_URL=http://api:5005`; the services share a Docker network, so Attendee can post callbacks directly to the API without a public tunnel. The Compose override disables Attendee's HTTPS-only webhook URL check for this local stack. If you use a hosted Attendee instance, set `APP_PUBLIC_URL` to a public HTTPS tunnel URL instead. Choose a long random `APP_API_TOKEN`. Docker Compose passes `.env` to the API container at runtime; it is excluded from the image build. The API's SQLite database is stored in a persistent Docker volume. The first Whisper transcription downloads the model selected by `MLX_WHISPER_MODEL`; it defaults to `mlx-community/whisper-turbo`.
 
 Activate the vLLM-Metal environment and start everything from the repository root:
 
@@ -76,7 +101,7 @@ docker compose exec attendee-app-local python manage.py migrate
 
 Create an account at `http://localhost:8000`. Attendee prints the confirmation link in its app logs; retrieve it with `docker compose logs attendee-app-local`. After confirming, create an API key and configure the webhook secret in Attendee settings; put those values in this project's `.env` as `ATTENDEE_API_KEY` and `ATTENDEE_WEBHOOK_SECRET`.
 
-The API is available at `http://127.0.0.1:5005`. Point the public HTTPS tunnel at that address for Attendee callbacks. Use `uv run --no-active --group dev python scripts/dev.py down` to stop the Compose stack and the native servers started by the launcher. Its native server logs are in `.dev-run/`. Docker volumes remain between restarts; `docker compose down -v` also deletes the Jira database, Attendee's Postgres data, and local recording storage.
+The API is available from the host at `http://127.0.0.1:5005`; local Attendee callbacks use `http://api:5005` over Compose networking. If you connect to a hosted Attendee instance, point a public HTTPS tunnel at the host API address. Use `uv run --no-active --group dev python scripts/dev.py down` to stop the Compose stack and the native servers started by the launcher. Its native server logs are in `.dev-run/`. Docker volumes remain between restarts; `docker compose down -v` also deletes the Jira database, Attendee's Postgres data, and local recording storage.
 
 ## API
 

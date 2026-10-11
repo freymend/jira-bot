@@ -1,6 +1,7 @@
 services:
   attendee-app-local:
     environment:
+      REQUIRE_HTTPS_WEBHOOKS: "false"
       AWS_RECORDING_STORAGE_BUCKET_NAME: attendee-recordings
       AWS_ACCESS_KEY_ID: ATTENDEELOCAL
       AWS_SECRET_ACCESS_KEY: attendee-local-development

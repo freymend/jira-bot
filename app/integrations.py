@@ -7,6 +7,7 @@ import hmac
 import json
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from openai import AsyncOpenAI
@@ -28,8 +29,20 @@ class AttendeeClient:
     async def create_bot(self, meeting_url: str) -> dict[str, Any]:
         if not settings.attendee_api_key:
             raise RuntimeError("ATTENDEE_API_KEY is not configured")
-        if not settings.app_public_url.startswith("https://"):
-            raise RuntimeError("APP_PUBLIC_URL must be a public HTTPS URL")
+        callback_url = urlsplit(settings.app_public_url)
+        is_public_https_url = (
+            callback_url.scheme == "https" and callback_url.hostname is not None
+        )
+        is_local_compose_url = (
+            callback_url.scheme == "http"
+            and callback_url.hostname == "api"
+            and callback_url.port == 5005
+        )
+        if not (is_public_https_url or is_local_compose_url):
+            raise RuntimeError(
+                "APP_PUBLIC_URL must be a public HTTPS URL or http://api:5005 "
+                "on the local Compose network"
+            )
         if not settings.mlx_transcriber_api_key:
             raise RuntimeError("MLX_TRANSCRIBER_API_KEY is not configured")
         transcription_settings: dict[str, Any] = {
