@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <title>Meeting Agent Dashboard</title>
+    <link rel="stylesheet" href="/static/dashboard.css" />
+    <script src="/static/dashboard.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">LOCAL SERVICE</p>
+          <h1>Meeting Agent</h1>
+        </div>
+        <div class="topbar-actions">
+          <span id="overall-status" class="status-pill status-unknown">Loading</span>
+          <button id="refresh-button" class="button secondary" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <div id="notice" class="notice hidden" role="status"></div>
+      <div id="restart-notice" class="notice warning hidden" role="status">
+        Configuration saved to <code>.env</code>. Restart the local stack with <code>scripts/dev.py down</code> followed by <code>scripts/dev.py up</code> for changes to take effect.
+      </div>
+
+      <nav class="tabs" aria-label="Dashboard sections">
+        <button class="tab active" data-panel="overview-panel" type="button">Overview</button>
+        <button class="tab" data-panel="config-panel" type="button">Configuration</button>
+      </nav>
+
+      <main>
+        <section id="overview-panel" class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">SYSTEM</p>
+              <h2>Health services</h2>
+            </div>
+            <span id="updated-at" class="muted">Waiting for status…</span>
+          </div>
+          <div id="service-grid" class="service-grid" aria-live="polite"></div>
+
+          <div class="section-heading meetings-heading">
+            <div>
+              <p class="eyebrow">AUTO-JOIN</p>
+              <h2>Scheduled calendar joins</h2>
+            </div>
+            <span id="calendar-summary" class="muted"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Event</th>
+                  <th>Starts</th>
+                  <th>Join status</th>
+                  <th>Agent</th>
+                  <th>Meeting link</th>
+                </tr>
+              </thead>
+              <tbody id="calendar-body">
+                <tr><td colspan="5" class="empty">Loading calendar schedule…</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="section-heading meetings-heading">
+            <div>
+              <p class="eyebrow">ACTIVITY</p>
+              <h2>Recent meetings</h2>
+            </div>
+            <span id="meeting-count" class="muted"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Meeting</th>
+                  <th>Agent state</th>
+                  <th>Pipeline</th>
+                  <th>Tasks</th>
+                  <th>Started</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody id="meetings-body">
+                <tr><td colspan="6" class="empty">Loading meetings…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="config-panel" class="panel hidden">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">LOCAL SETTINGS</p>
+              <h2>Service configuration</h2>
+            </div>
+            <span class="muted">Secrets are never displayed.</span>
+          </div>
+          <p class="config-intro">
+            Settings are written to the project <code>.env</code>. Leave secret fields blank to keep their current values.
+            Changes take effect after restarting the local stack.
+          </p>
+          <form id="config-form">
+            <div id="config-fields"></div>
+            <div class="form-actions">
+              <button id="save-config" class="button primary" type="submit">Save configuration</button>
+              <span id="config-result" class="muted" role="status"></span>
+            </div>
+          </form>
+        </section>
+      </main>
+
+      <footer>
+        <span>Bound to localhost · Authenticated with <code>APP_API_TOKEN</code></span>
+        <button id="lock-button" class="link-button" type="button">Lock dashboard</button>
+      </footer>
+    </div>
+
+    <div id="auth-gate" class="auth-backdrop">
+      <form id="auth-form" class="auth-card">
+        <p class="eyebrow">LOCAL ACCESS</p>
+        <h2>Unlock dashboard</h2>
+        <p class="muted">Enter the <code>APP_API_TOKEN</code> from your local <code>.env</code>.</p>
+        <label for="auth-token">API token</label>
+        <input id="auth-token" name="token" type="password" autocomplete="current-password" required />
+        <p id="auth-error" class="error hidden" role="alert"></p>
+        <button class="button primary full-width" type="submit">Unlock</button>
+      </form>
+    </div>
+  </body>
+</html>

@@ -939,6 +939,22 @@ def is_screenshare_capture_enabled(bot_id: str) -> bool:
         return row is not None and bool(row["screenshare_capture_enabled"])
 
 
+def list_recent_meetings(limit: int = 25) -> list[dict[str, Any]]:
+    bounded_limit = min(max(limit, 1), 100)
+    with _connect() as connection:
+        rows = connection.execute(
+            """SELECT m.bot_id, m.meeting_url, m.created_at, m.bot_state,
+                      m.transcription_state, m.status, m.error, COUNT(t.id) AS task_count
+               FROM meetings AS m
+               LEFT JOIN tasks AS t ON t.bot_id=m.bot_id
+               GROUP BY m.bot_id
+               ORDER BY m.created_at DESC
+               LIMIT ?""",
+            (bounded_limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def get_meeting(bot_id: str) -> dict[str, Any] | None:
     with _connect() as connection:
         meeting = connection.execute(

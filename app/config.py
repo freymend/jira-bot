@@ -40,6 +40,7 @@ class Settings:
     attendee_api_base: str
     attendee_bot_name: str
     mlx_transcriber_api_key: str
+    mlx_transcriber_health_url: str
     mlx_whisper_language: str
     llm_base_url: str
     llm_api_key: str

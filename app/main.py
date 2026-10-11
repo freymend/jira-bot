@@ -10,9 +10,9 @@ import logging
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from fastapi import (
     Depends,
@@ -24,6 +24,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import JSONResponse, Response
+import httpx
 
 from app import db
 from app.calendar_scheduler import (
@@ -33,6 +34,7 @@ from app.calendar_scheduler import (
 from app.config import settings
 from app.integrations.attendee import verify_attendee_signature
 from app.integrations.transcript import normalize_segments
+from app.meeting_lifecycle import run_meeting_leave_monitor
 from app.pipeline import attendee
 from app.schemas import MeetingStartRequest
 
@@ -104,6 +106,127 @@ async def health() -> JSONResponse:
             },
         },
     )
+
+
+async def _probe_service(
+    client: httpx.AsyncClient, url: str, *, headers: dict[str, str] | None = None
+) -> str:
+    if not url:
+        return "not_configured"
+    try:
+        response = await client.get(url, headers=headers)
+    except httpx.HTTPError:
+        return "unavailable"
+    return "healthy" if response.is_success else "unavailable"
+
+
+@app.get("/dashboard/api/overview", dependencies=[Depends(require_app_auth)])
+async def dashboard_overview(limit: int = 25) -> dict[str, Any]:
+    local_checks = db.health_checks()
+    attendee_parts = urlsplit(settings.attendee_api_base)
+    attendee_health_url = (
+        f"{attendee_parts.scheme}://{attendee_parts.netloc}/health/"
+        if attendee_parts.scheme and attendee_parts.netloc
+        else ""
+    )
+    model_base_url = settings.llm_base_url.rstrip("/")
+    if model_base_url.endswith("/v1"):
+        model_base_url = model_base_url[:-3]
+    model_health_url = f"{model_base_url}/health" if model_base_url else ""
+    model_headers = (
+        {"Authorization": f"Bearer {settings.llm_api_key}"}
+        if settings.llm_api_key
+        else None
+    )
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(3, connect=1)) as client:
+        attendee_status, model_status, transcriber_status = await asyncio.gather(
+            _probe_service(client, attendee_health_url),
+            _probe_service(client, model_health_url, headers=model_headers),
+            _probe_service(client, settings.mlx_transcriber_health_url),
+        )
+
+    services = [
+        {"name": "API", "status": "healthy"},
+        {
+            "name": "Database",
+            "status": "healthy" if local_checks["database"] else "unavailable",
+        },
+        {
+            "name": "Job worker",
+            "status": "healthy" if local_checks["worker"] else "unavailable",
+        },
+        {"name": "Attendee", "status": attendee_status},
+        {"name": "Task model", "status": model_status},
+        {"name": "MLX Whisper", "status": transcriber_status},
+        {
+            "name": "Jira",
+            "status": (
+                "configured"
+                if all(
+                    (
+                        settings.jira_base_url,
+                        settings.jira_email,
+                        settings.jira_api_token,
+                        settings.jira_project_key,
+                    )
+                )
+                else "not_configured"
+            ),
+        },
+        {
+            "name": "Calendar auto-join",
+            "status": (
+                "enabled" if settings.google_calendar_auto_join_enabled else "disabled"
+            ),
+        },
+    ]
+    critical_statuses = {"healthy"}
+    overall_status = (
+        "healthy"
+        if all(service["status"] in critical_statuses for service in services[:6])
+        else "degraded"
+    )
+    now = datetime.now(UTC)
+    calendar_events: list[dict[str, Any]] = []
+    if settings.google_calendar_auto_join_enabled:
+        event_rows = db.list_due_calendar_events(
+            settings.google_calendar_id,
+            now.isoformat(),
+            (now + timedelta(days=14)).isoformat(),
+        )
+        attempts = {
+            (str(item["calendar_event_id"]), str(item["event_start"])): item
+            for item in db.list_calendar_auto_joins(limit=100)
+        }
+        for event in event_rows:
+            attempt = attempts.get(
+                (str(event["calendar_event_id"]), str(event["event_start"])), {}
+            )
+            calendar_events.append(
+                {
+                    "event_id": event["calendar_event_id"],
+                    "event_title": settings.google_calendar_event_title,
+                    "event_start": event["event_start"],
+                    "event_end": event.get("event_end"),
+                    "meeting_url": event["meeting_url"],
+                    "join_status": attempt.get("status", "scheduled"),
+                    "bot_id": attempt.get("bot_id"),
+                    "error": attempt.get("error"),
+                }
+            )
+    return {
+        "status": overall_status,
+        "updated_at": now.isoformat(),
+        "services": services,
+        "recent_meetings": db.list_recent_meetings(limit),
+        "calendar": {
+            "enabled": settings.google_calendar_auto_join_enabled,
+            "event_title_filter": settings.google_calendar_event_title or None,
+            "time_zone": settings.google_calendar_timezone,
+            "upcoming_events": calendar_events,
+        },
+    }
 
 
 @app.post("/webhooks/google-calendar")

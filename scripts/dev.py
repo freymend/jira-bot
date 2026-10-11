@@ -53,6 +53,8 @@ def _pid_matches_service(pid: int, name: str) -> bool:
     command = result.stdout.lower()
     if name == "gemma":
         return "vllm" in command and "serve" in command
+    if name == "dashboard":
+        return "uvicorn" in command and "app.dashboard.server:app" in command
     return "uvicorn" in command and "mlx_transcriber.main" in command
 
 
@@ -153,8 +155,22 @@ def _stop_native_service(name: str) -> None:
 
 
 def _stop_native_services() -> None:
-    for name in ("gemma", "mlx-whisper"):
+    for name in ("dashboard", "gemma", "mlx-whisper"):
         _stop_native_service(name)
+
+
+def _dashboard_command() -> list[str]:
+    port = _setting("LOCAL_DASHBOARD_PORT", "5006")
+    return [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "app.dashboard.server:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        port,
+    ]
 
 
 def _whisper_command() -> list[str]:
@@ -237,11 +253,20 @@ def up() -> None:
             "http://127.0.0.1:8101/health",
         )
         _compose("up", "--build", "-d")
+        dashboard_port = _setting("LOCAL_DASHBOARD_PORT", "5006")
+        _start_native_service(
+            "dashboard",
+            _dashboard_command(),
+            ROOT,
+            f"http://127.0.0.1:{dashboard_port}/health/live",
+        )
     except (OSError, RuntimeError, subprocess.CalledProcessError, TimeoutError):
         _stop_native_services()
         raise
+    dashboard_port = _setting("LOCAL_DASHBOARD_PORT", "5006")
     print("API, Attendee, MLX Whisper, and Gemma are running.")
-    print("Native model logs: .dev-run/mlx-whisper.log and .dev-run/gemma.log")
+    print(f"Local dashboard: http://127.0.0.1:{dashboard_port}")
+    print("Native logs: .dev-run/mlx-whisper.log, .dev-run/gemma.log, and .dev-run/dashboard.log")
 
 
 def restart_whisper() -> None:
