@@ -4,6 +4,10 @@
 
 The service joins a manually submitted Google Meet, transcribes audio locally, extracts action items, and can create Jira issues. Issue creation remains opt-in through `JIRA_DRY_RUN`. The API exposes meeting and pipeline state, but there is no operator dashboard or attendee-facing task feedback yet.
 
+## Known gaps
+
+- Attendee captures Google Meet chat text, but does not currently capture or expose the contents of files shared in chat. The task pipeline does not fetch Drive links or process shared documents, spreadsheets, or images; chat-based enrichment is limited to message text. Future support will require an explicit Drive read-only grant and bounded per-file and per-task token budgets.
+
 ## Roadmap
 
 ### 1. Add screen-share context to task creation

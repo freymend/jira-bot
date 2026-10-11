@@ -193,4 +193,4 @@ An issue-creation request that fails is recorded as `uncertain` so a retry does 
 
 ## Current scope
 
-See [plan.md](./plan.md) for the development roadmap.
+Attendee currently captures Google Meet chat text, not the contents of files shared in chat. The task pipeline does not fetch Drive links or process shared documents, spreadsheets, or images; chat enrichment uses message text only. See [plan.md](./plan.md) for this known gap and the development roadmap.
