@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
+from app.db_migrations import apply_migrations
 
 
 def _now() -> str:
@@ -34,104 +35,7 @@ def _connect() -> Generator[sqlite3.Connection, None, None]:
 
 def init_db() -> None:
     with _connect() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS meetings (
-                bot_id TEXT PRIMARY KEY,
-                meeting_url TEXT,
-                bot_state TEXT,
-                created_at TEXT NOT NULL,
-                transcription_state TEXT NOT NULL DEFAULT 'not_started',
-                status TEXT NOT NULL DEFAULT 'waiting',
-                transcript_json TEXT,
-                error TEXT
-            );
-            CREATE TABLE IF NOT EXISTS webhook_events (
-                event_id TEXT PRIMARY KEY,
-                bot_id TEXT NOT NULL,
-                trigger TEXT NOT NULL,
-                received_at TEXT NOT NULL,
-                payload_json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS transcript_segments (
-                bot_id TEXT NOT NULL,
-                segment_key TEXT NOT NULL,
-                timestamp_ms INTEGER,
-                speaker_name TEXT,
-                speaker_uuid TEXT,
-                text TEXT NOT NULL,
-                raw_json TEXT NOT NULL,
-                PRIMARY KEY (bot_id, segment_key)
-            );
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                bot_id TEXT NOT NULL,
-                fingerprint TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                description TEXT NOT NULL,
-                owner_speaker TEXT,
-                owner_evidence_quote TEXT,
-                owner_timestamp_ms INTEGER,
-                due_date TEXT,
-                priority TEXT,
-                evidence_quote TEXT NOT NULL,
-                timestamp_ms INTEGER,
-                context_evidence_json TEXT NOT NULL DEFAULT '[]',
-                confidence REAL NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                jira_key TEXT,
-                error TEXT,
-                UNIQUE (bot_id, fingerprint)
-            );
-            CREATE TABLE IF NOT EXISTS background_jobs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                kind TEXT NOT NULL,
-                bot_id TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'queued',
-                attempts INTEGER NOT NULL DEFAULT 0,
-                available_at REAL NOT NULL,
-                lease_until REAL,
-                locked_by TEXT,
-                last_error TEXT,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                UNIQUE (kind, bot_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_background_jobs_ready
-                ON background_jobs(status, available_at, lease_until);
-            CREATE TABLE IF NOT EXISTS worker_heartbeats (
-                worker_id TEXT PRIMARY KEY,
-                heartbeat_at REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_tasks_bot_id ON tasks(bot_id);
-            """
-        )
-        meeting_columns = {
-            row["name"] for row in connection.execute("PRAGMA table_info(meetings)")
-        }
-        if "bot_state" not in meeting_columns:
-            connection.execute("ALTER TABLE meetings ADD COLUMN bot_state TEXT")
-        task_columns = {
-            row["name"] for row in connection.execute("PRAGMA table_info(tasks)")
-        }
-        task_column_migrations = {
-            "owner_evidence_quote": "TEXT",
-            "owner_timestamp_ms": "INTEGER",
-            "context_evidence_json": "TEXT NOT NULL DEFAULT '[]'",
-        }
-        for column, declaration in task_column_migrations.items():
-            if column not in task_columns:
-                connection.execute(
-                    f"ALTER TABLE tasks ADD COLUMN {column} {declaration}"
-                )
-        now = time.time()
-        connection.execute(
-            """INSERT OR IGNORE INTO background_jobs
-               (kind, bot_id, status, attempts, available_at, created_at, updated_at)
-               SELECT 'finalize_meeting', bot_id, 'queued', 0, ?, ?, ?
-               FROM meetings WHERE status='processing'""",
-            (now, now, now),
-        )
+        apply_migrations(connection)
 
 
 def create_meeting(

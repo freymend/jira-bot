@@ -39,7 +39,7 @@ sequenceDiagram
     Client->>API: Check status, leave, or reprocess
 ```
 
-The transcript, extracted-task records, cited context excerpts, and durable job queue are stored in SQLite at `DATABASE_PATH`, shared by the API and worker. Jobs are leased, retried with backoff up to five attempts, and reclaimed after a worker stops renewing its lease. This protects work across process and container restarts on the same host; it is not a substitute for off-host backups or a replicated production database. The transcript is sent to the configured local OpenAI-compatible model endpoint. Jira receives accepted task fields, a context-rich description, separate task and assignment quotes, cited transcript excerpts, and the meeting link when issue creation is enabled.
+The transcript, extracted-task records, cited context excerpts, and durable job queue are stored in SQLite at `DATABASE_PATH`, shared by the API and worker. On startup, both processes apply unapplied, versioned schema migrations in order. Jobs are leased, retried with backoff up to five attempts, and reclaimed after a worker stops renewing its lease. This protects work across process and container restarts on the same host; it is not a substitute for off-host backups or a replicated production database. The transcript is sent to the configured local OpenAI-compatible model endpoint. Jira receives accepted task fields, a context-rich description, separate task and assignment quotes, cited transcript excerpts, and the meeting link when issue creation is enabled.
 
 ## Requirements and setup
 
