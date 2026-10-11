@@ -1,0 +1,309 @@
+{
+  "name": "synthetic_daily_sync_60m_v1",
+  "description": "Fully fictional multi-speaker product-team sync with Zachary absent. Explicit teammate delegations to him are gold-labeled as assignments. Timestamps span about one hour; no real meeting data is included.",
+  "segments": [
+    {
+      "id": "s001",
+      "timestamp_ms": 11227,
+      "speaker_name": "Maya",
+      "text": "Morning, everyone. Zachary is out of today's sync, so we won't have his update. Let's cover release health, customer support, and onboarding, and make clear which items are assigned to someone for when he returns versus just being discussed."
+    },
+    {
+      "id": "s002",
+      "timestamp_ms": 47401,
+      "speaker_name": "Leo",
+      "text": "The release candidate is still on track. The mobile build went to internal testing yesterday, and the crash rate looks normal so far. I did notice the checkout retry chart is noisier than last week, but I haven't confirmed whether that's real traffic or duplicate events."
+    },
+    {
+      "id": "s003",
+      "timestamp_ms": 96049,
+      "speaker_name": "Priya",
+      "text": "I checked the event stream this morning. There are a few repeated payment attempts after a slow response, but I don't think the customer is always charged twice. The delayed response makes it hard to tell which attempt belongs to the final receipt."
+    },
+    {
+      "id": "s004",
+      "timestamp_ms": 169021,
+      "speaker_name": "Leo",
+      "text": "Zachary finished the analytics backfill yesterday, before he was out today. The older rows were missing a region value, and he filled it from the account record. That's already merged, so this is a status update and not a new task for him."
+    },
+    {
+      "id": "s005",
+      "timestamp_ms": 246359,
+      "speaker_name": "Nina",
+      "text": "Support has two reports that look related. Both customers tapped pay again after the spinner stayed up for several seconds. One receipt is clean, and the second report has a pending authorization, so support hasn't promised a refund or called it a duplicate charge yet."
+    },
+    {
+      "id": "s006",
+      "timestamp_ms": 319331,
+      "speaker_name": "Maya",
+      "text": "Let's avoid treating those as confirmed double charges until we compare the processor records. Somebody should probably look at the retry behavior, but I don't want to create a ticket based only on two reports. Can we bring back evidence after we know what happened?"
+    },
+    {
+      "id": "s007",
+      "timestamp_ms": 434091,
+      "speaker_name": "Omar",
+      "text": "I compared the two processor records. One is just a pending authorization and the other settled once. The customer-facing messages were confusing, though. I can send the support team a short explanation after this call so they know what to tell the customers."
+    },
+    {
+      "id": "s008",
+      "timestamp_ms": 548226,
+      "speaker_name": "Leo",
+      "text": "For context, the retry chart uses the client event timestamp, not the processor timestamp. That means a slow response can make the same checkout look like two attempts in the dashboard even when the processor only sees one settled payment."
+    },
+    {
+      "id": "s009",
+      "timestamp_ms": 645522,
+      "speaker_name": "Priya",
+      "text": "I found a separate case in staging where two requests really do reach the service. The current handler doesn't have an idempotency guard for the retry key, so we should fix that before we widen the rollout. It is reproducible with a delayed network response."
+    },
+    {
+      "id": "s010",
+      "timestamp_ms": 711011,
+      "speaker_name": "Maya",
+      "text": "Zachary is out today, but let's assign the checkout idempotency fix and delayed-response regression test to Zachary for when he returns. Keep the change behind the existing feature branch until QA can verify it."
+    },
+    {
+      "id": "s011",
+      "timestamp_ms": 785853,
+      "speaker_name": "Priya",
+      "text": "The delayed response only reproduces when the client repeats the request after a timeout. The regression should distinguish duplicate requests at the service from a single settled processor receipt, so we don't mistake a chart artifact for a second charge."
+    },
+    {
+      "id": "s012",
+      "timestamp_ms": 866934,
+      "speaker_name": "Priya",
+      "text": "That should also make the chart easier to interpret. We should keep the client retry event for diagnostics, but the payment-success metric needs to count settled processor receipts rather than button taps."
+    },
+    {
+      "id": "s013",
+      "timestamp_ms": 954251,
+      "speaker_name": "Maya",
+      "text": "For the older mobile client, we still don't know whether it sends a retry key. Since Zachary is out, we'll leave the rollout date uncommitted until the compatibility question is answered; nobody is taking that question on his behalf today."
+    },
+    {
+      "id": "s014",
+      "timestamp_ms": 1041568,
+      "speaker_name": "Maya",
+      "text": "Let's capture that compatibility question during review. We don't need to hold the dashboard cleanup for the full mobile rollout, but the payment fix should stay gated until we know the older client behaves safely."
+    },
+    {
+      "id": "s015",
+      "timestamp_ms": 1128885,
+      "speaker_name": "Leo",
+      "text": "On onboarding, the revised first-run checklist is in the prototype. The screenshots still show the old permission prompt, and a new customer could think location access is required before they can continue. We should make that optional state obvious."
+    },
+    {
+      "id": "s016",
+      "timestamp_ms": 1209966,
+      "speaker_name": "Leo",
+      "text": "Zachary is out today, but let's assign the onboarding screenshots and first-run help text to Zachary for when he returns. The designer has already approved the new wording, and the screenshots should show that location access is optional."
+    },
+    {
+      "id": "s017",
+      "timestamp_ms": 1291046,
+      "speaker_name": "Nina",
+      "text": "The new wording is already approved, and the account manager can ask whether it was clear during the scheduled customer call. We should wait to say the screenshots are ready until Zachary updates them."
+    },
+    {
+      "id": "s018",
+      "timestamp_ms": 1372126,
+      "speaker_name": "Nina",
+      "text": "I can ask the newest customer whether the wording made sense, but I haven't scheduled that conversation yet. The account manager is already meeting them later this week, so we can add the question to that call instead of creating another meeting."
+    },
+    {
+      "id": "s019",
+      "timestamp_ms": 1459442,
+      "speaker_name": "Maya",
+      "text": "I'll add the optional-permission question to the account manager's call notes. That's mine to do; Zachary is only handling the product screenshots and help text."
+    },
+    {
+      "id": "s020",
+      "timestamp_ms": 1540523,
+      "speaker_name": "Leo",
+      "text": "The prototype text was checked this morning, but the final screenshots are not updated yet. The old images in the help-center article are part of Zachary's same update, not a separate task or a reason to reassign it."
+    },
+    {
+      "id": "s021",
+      "timestamp_ms": 1627839,
+      "speaker_name": "Priya",
+      "text": "The rollout checklist has a separate gap: it says to monitor conversion, but it doesn't name the alert or the person watching it. We can reuse the standard checkout alert if we put the exact dashboard link in the checklist."
+    },
+    {
+      "id": "s022",
+      "timestamp_ms": 1708919,
+      "speaker_name": "Omar",
+      "text": "I can update the rollout checklist with the checkout alert link and add the support escalation steps. I'll do that before the next release review, after I confirm the alert is visible to the on-call group."
+    },
+    {
+      "id": "s023",
+      "timestamp_ms": 1790000,
+      "speaker_name": "Maya",
+      "text": "Great. If the on-call group can't see the alert, don't broaden access on your own; send me the permission error and we'll use the approved group. This is a documentation update, not a new alert configuration."
+    },
+    {
+      "id": "s024",
+      "timestamp_ms": 1877317,
+      "speaker_name": "Nina",
+      "text": "I have one more support item, but it can wait. A customer asked if the export includes refunded orders. The answer is yes, though the refund reason is not included. They didn't ask for a product change, just a clear answer about the current report."
+    },
+    {
+      "id": "s025",
+      "timestamp_ms": 1958397,
+      "speaker_name": "Leo",
+      "text": "For the billing export, I compared the CSV with the API response. The totals agree. The timezone label in the header is confusing because the file uses UTC while the account page shows local time, but we haven't seen a wrong amount or a missing row."
+    },
+    {
+      "id": "s026",
+      "timestamp_ms": 2039477,
+      "speaker_name": "Priya",
+      "text": "I can add a note about UTC to the export help page. It's a small clarification and doesn't need a code change. If anyone finds a real mismatch in the totals, please paste the account ID and export date in the incident thread."
+    },
+    {
+      "id": "s027",
+      "timestamp_ms": 2120558,
+      "speaker_name": "Nina",
+      "text": "Zachary reviewed the export query last week and merged the timezone label change. That part is complete. He was tagged in the incident thread because he used to own the report, but he's not assigned to any export work today."
+    },
+    {
+      "id": "s028",
+      "timestamp_ms": 2201638,
+      "speaker_name": "Omar",
+      "text": "The on-call alert is visible to the group now. I tested the link from a non-admin account and it opened the same chart. I'll paste the link into the checklist after I finish the permission check; I don't need anyone else to change the alert."
+    },
+    {
+      "id": "s029",
+      "timestamp_ms": 2282718,
+      "speaker_name": "Maya",
+      "text": "Let's move to telemetry. The current event schema doesn't distinguish a timeout from a user cancel, and the support notes are mixing those two cases. We should preserve the old field for existing reports while we add a more specific result value."
+    },
+    {
+      "id": "s030",
+      "timestamp_ms": 2363798,
+      "speaker_name": "Priya",
+      "text": "Zachary is out today, but let's assign him the parser tests for timeout and user-cancel values to pick up when he returns. Keep the legacy event field in the payload so the existing weekly report doesn't break."
+    },
+    {
+      "id": "s031",
+      "timestamp_ms": 2444878,
+      "speaker_name": "Leo",
+      "text": "The partner team can wait on the new result value until the parser review. Keeping the legacy field in the sample payload means the weekly report won't break, so we shouldn't promise a release date while Zachary is out."
+    },
+    {
+      "id": "s032",
+      "timestamp_ms": 2525958,
+      "speaker_name": "Priya",
+      "text": "I can update the weekly report query after the parser change lands. I'll add a separate timeout column and leave the existing cancellation count unchanged, so we can compare the new breakdown without changing the historical chart."
+    },
+    {
+      "id": "s033",
+      "timestamp_ms": 2607038,
+      "speaker_name": "Leo",
+      "text": "The partner API team asked whether we can expose the new result value this sprint. I told them we'd confirm after the parser review. No partner-facing date is promised yet, and we should not put one in the release notes until product signs off."
+    },
+    {
+      "id": "s034",
+      "timestamp_ms": 2688118,
+      "speaker_name": "Maya",
+      "text": "Agreed. We can share the schema proposal once the compatibility review is done. If the partner team needs a date today, tell them we will follow up rather than guessing."
+    },
+    {
+      "id": "s035",
+      "timestamp_ms": 2769199,
+      "speaker_name": "Nina",
+      "text": "The account team also asked for a short explanation of the optional permission prompt. I'll send them the approved wording from the prototype after Zachary's screenshots are ready, so they don't quote the old help page."
+    },
+    {
+      "id": "s036",
+      "timestamp_ms": 2850279,
+      "speaker_name": "Maya",
+      "text": "The call notes are covered; I own those. Zachary's explicitly delegated screenshots are still pending because he's out, so we should not create a second ticket or ask someone else to take the same work."
+    },
+    {
+      "id": "s037",
+      "timestamp_ms": 2931359,
+      "speaker_name": "Omar",
+      "text": "One reliability question: the staging retry alarm triggered during a deploy, but the service recovered without a rollback. I think the threshold is too sensitive for a short warm-up. We should compare it with last month's deploys before changing the alert."
+    },
+    {
+      "id": "s038",
+      "timestamp_ms": 3012439,
+      "speaker_name": "Maya",
+      "text": "Could someone review the last few deploys and suggest a threshold? Let's not make the change during this call. If we decide to take it on, we'll give it an owner in planning."
+    },
+    {
+      "id": "s039",
+      "timestamp_ms": 3093519,
+      "speaker_name": "Leo",
+      "text": "I can pull the deploy history for planning, but I haven't committed to the analysis yet because the reliability team may already have a chart. I'll check with them first and bring back what exists."
+    },
+    {
+      "id": "s040",
+      "timestamp_ms": 3174599,
+      "speaker_name": "Maya",
+      "text": "Thanks. For today,     The committed items are the checkout fix, onboarding screenshots, and parser tests with Zachary, Omar's rollout checklist, and the weekly report query with Priya. The alert threshold is still an open question, not an assigned task."
+    },
+    {
+      "id": "s041",
+      "timestamp_ms": 3255679,
+      "speaker_name": "Priya",
+      "text": "I should also update the event-schema note with the compatibility decision before we share it with the partner team. I'll draft that after the parser review, and I can reuse the release note template."
+    },
+    {
+      "id": "s042",
+      "timestamp_ms": 3336760,
+      "speaker_name": "Maya",
+      "text": "We have two items explicitly queued for Zachary when he returns: the checkout fix and the parser tests. The alert-threshold analysis is not assigned to him or anyone else; leave it as a planning question until we decide whether to take it on."
+    },
+    {
+      "id": "s043",
+      "timestamp_ms": 3417840,
+      "speaker_name": "Maya",
+      "text": "Before we wrap, does anyone see a release blocker? The current list is the checkout regression test, compatibility review, onboarding screenshots, and making the report easier to read. The customer export question is support-only."
+    },
+    {
+      "id": "s044",
+      "timestamp_ms": 3498920,
+      "speaker_name": "Leo",
+      "text": "No blocker from me. I'll bring the client-compatibility notes to the release review, but I still need to check whether the older build sends a retry key. That's an investigation for the review, not a promise to change the client."
+    },
+    {
+      "id": "s045",
+      "timestamp_ms": 3580000,
+      "speaker_name": "Maya",
+      "text": "Okay, we'll stop there. Please add committed work to the board after this call, and leave the alert-threshold idea in the planning notes until it has an owner. Thanks, everyone."
+    }
+  ],
+  "expected_tasks": [
+    {
+      "id": "checkout-idempotency",
+      "summary": "Add an idempotency guard and delayed-response regression test for checkout retries",
+      "evidence_segment_id": "s010",
+      "evidence_quote": "assign the checkout idempotency fix and delayed-response regression test to Zachary for when he returns",
+      "owner_speaker": "Zachary",
+      "owner_evidence_segment_id": "s010",
+      "owner_evidence_quote": "let's assign the checkout idempotency fix and delayed-response regression test to Zachary for when he returns.",
+      "actual_owner": "Zachary"
+    },
+    {
+      "id": "onboarding-screenshots",
+      "summary": "Update onboarding screenshots and first-run help text for optional location permission",
+      "evidence_segment_id": "s016",
+      "evidence_quote": "assign the onboarding screenshots and first-run help text to Zachary for when he returns",
+      "owner_speaker": "Zachary",
+      "owner_evidence_segment_id": "s016",
+      "owner_evidence_quote": "let's assign the onboarding screenshots and first-run help text to Zachary for when he returns.",
+      "actual_owner": "Zachary"
+    },
+    {
+      "id": "telemetry-parser-tests",
+      "summary": "Add timeout and user-cancel parser tests while preserving the legacy event field",
+      "evidence_segment_id": "s030",
+      "evidence_quote": "assign him the parser tests for timeout and user-cancel values to pick up when he returns",
+      "owner_speaker": "Zachary",
+      "owner_evidence_segment_id": "s030",
+      "owner_evidence_quote": "Zachary is out today, but let's assign him the parser tests for timeout and user-cancel values to pick up when he returns.",
+      "actual_owner": "Zachary"
+    }
+  ],
+  "scope_owner": "Zachary"
+}

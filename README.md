@@ -140,7 +140,17 @@ The meeting status endpoint includes the Attendee bot state, pipeline status, fi
 
 ## Jira configuration
 
-Keep `JIRA_DRY_RUN=true` while evaluating proposals. Once validated, configure the Jira site, email, API token, project key, and issue type, then set `JIRA_DRY_RUN=false` and restart the service. Only `Zachary` or `Zac` can be assigned, and only when that exact name is spoken in the assignment evidence and the utterance identifies who accepted the task. Speaker labels, pronouns, and inferred identity do not qualify. `JIRA_SPEAKER_ACCOUNT_IDS` maps either eligible name to a Jira account ID; other owners remain unassigned. `JIRA_PRIORITY_MAP` maps model priority labels to Jira priority names. Due dates are included only when the model extracts a specific ISO date.
+Keep `JIRA_DRY_RUN=true` while evaluating proposals. Once validated, configure the Jira site, email, API token, project key, and issue type, then set `JIRA_DRY_RUN=false` and restart the service. Only `Zachary` or `Zac` can be assigned, and only when that exact name appears in explicit assignment or acceptance evidence. A clear delegation to an absent teammate counts; speculation, speaker labels, pronouns, and inferred identity do not. `JIRA_SPEAKER_ACCOUNT_IDS` maps either eligible name to a Jira account ID; other owners remain unassigned. `JIRA_PRIORITY_MAP` maps model priority labels to Jira priority names. Due dates are included only when the model extracts a specific ISO date.
+
+### Quick synthetic evaluation
+
+A fully fictional, multi-speaker daily-sync fixture with timestamps spanning about an hour is included at `tests/fixtures/synthetic_daily_sync.json`. Zachary is absent from the speaker list; explicit teammate delegations to him are labeled as assignments, while speculative or unowned work is not. Only Zachary's tasks are in the gold set; other tasks in the meeting are distractors. Run the extractor against the configured local model without creating Jira issues:
+
+```sh
+uv run --no-active --group dev python -m scripts.evaluate_task_extraction
+```
+
+The report compares raw proposals with proposals that pass the configured confidence threshold. It matches tasks by their cited transcript segment and normalizes `Zac` to `Zachary`, so review summaries, quotes, and task duplicates manually. This is a quick smoke/regression check, not a substitute for labeled real meetings.
 
 An issue-creation request that fails is recorded as `uncertain` so a retry does not accidentally create a duplicate issue. Inspect the meeting record and Jira before manually retrying an uncertain proposal.
 

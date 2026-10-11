@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
@@ -26,6 +27,80 @@ class DurableJobTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.settings_patch.stop()
         self.temp_dir.cleanup()
+
+    def test_migrations_upgrade_legacy_database_and_run_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "legacy.sqlite3"
+            with sqlite3.connect(database_path) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE meetings (
+                        bot_id TEXT PRIMARY KEY,
+                        meeting_url TEXT,
+                        created_at TEXT NOT NULL,
+                        transcription_state TEXT NOT NULL DEFAULT 'not_started',
+                        status TEXT NOT NULL DEFAULT 'waiting',
+                        transcript_json TEXT,
+                        error TEXT
+                    );
+                    CREATE TABLE tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        bot_id TEXT NOT NULL,
+                        fingerprint TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        owner_speaker TEXT,
+                        due_date TEXT,
+                        priority TEXT,
+                        evidence_quote TEXT NOT NULL,
+                        timestamp_ms INTEGER,
+                        confidence REAL NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        jira_key TEXT,
+                        error TEXT,
+                        UNIQUE (bot_id, fingerprint)
+                    );
+                    INSERT INTO meetings(bot_id, created_at, status)
+                    VALUES ('legacy-bot', '2025-01-01T00:00:00+00:00', 'processing');
+                    """
+                )
+
+            with patch(
+                "app.db.settings",
+                replace(settings, database_path=str(database_path)),
+            ):
+                db.init_db()
+                db.init_db()
+                with db._connect() as connection:
+                    meeting_columns = {
+                        row["name"]
+                        for row in connection.execute("PRAGMA table_info(meetings)")
+                    }
+                    task_columns = {
+                        row["name"]
+                        for row in connection.execute("PRAGMA table_info(tasks)")
+                    }
+                    versions = [
+                        row["version"]
+                        for row in connection.execute(
+                            "SELECT version FROM schema_migrations ORDER BY version"
+                        )
+                    ]
+                    jobs = connection.execute(
+                        "SELECT COUNT(*) AS count FROM background_jobs "
+                        "WHERE bot_id='legacy-bot'"
+                    ).fetchone()["count"]
+
+            self.assertIn("bot_state", meeting_columns)
+            self.assertTrue(
+                {
+                    "owner_evidence_quote",
+                    "owner_timestamp_ms",
+                    "context_evidence_json",
+                }.issubset(task_columns)
+            )
+            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertEqual(jobs, 1)
 
     def test_final_webhook_queues_once_and_expired_lease_is_reclaimed(self) -> None:
         payload = {"trigger": "bot.state_change", "bot_id": "bot-1"}
@@ -124,9 +199,7 @@ class DurableJobTests(unittest.TestCase):
         self.assertEqual(meeting_status, "error")
 
     def test_readiness_requires_a_recent_worker_heartbeat(self) -> None:
-        self.assertEqual(
-            db.health_checks(), {"database": True, "worker": False}
-        )
+        self.assertEqual(db.health_checks(), {"database": True, "worker": False})
         db.record_worker_heartbeat("worker-1")
         self.assertEqual(db.health_checks(), {"database": True, "worker": True})
 
