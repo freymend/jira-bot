@@ -57,7 +57,9 @@ Project dependencies are declared in `pyproject.toml`; `uv.lock` records the res
 
 ## Configure Attendee locally
 
-Attendee's upstream development stack is included in this project's Compose configuration. The API, Attendee API, worker, scheduler, Postgres, Redis, and RustFS recording storage start and stop together. The API reaches Attendee over the Compose network; Attendee's worker sends raw PCM audio to MLX Whisper on the Mac at `host.docker.internal:8101/transcribe`. Gemma uses port `8100`.
+Attendee's upstream development stack is included in this project's Compose configuration. The API, Attendee API, worker, scheduler, Postgres, Redis, and RustFS recording storage start and stop together. The API reaches Attendee over the Compose network; Attendee's API and worker both receive the custom transcription URL, and the worker sends raw PCM audio to MLX Whisper on the Mac at `host.docker.internal:8101/transcribe`. Gemma uses port `8100`.
+
+The local Compose override adds `attendee-app-local` to Attendee's Django `ALLOWED_HOSTS`, so requests from the API container are accepted by Django.
 
 Clone Attendee next to this repository once, then generate its development environment file:
 

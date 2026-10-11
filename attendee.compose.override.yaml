@@ -1,6 +1,9 @@
 services:
   attendee-app-local:
     environment:
+      ALLOWED_HOSTS: localhost,127.0.0.1,attendee-app-local
+      CUSTOM_ASYNC_TRANSCRIPTION_URL: http://host.docker.internal:8101/transcribe
+      CUSTOM_ASYNC_TRANSCRIPTION_TIMEOUT: "600"
       REQUIRE_HTTPS_WEBHOOKS: "false"
       AWS_RECORDING_STORAGE_BUCKET_NAME: attendee-recordings
       AWS_ACCESS_KEY_ID: ATTENDEELOCAL
