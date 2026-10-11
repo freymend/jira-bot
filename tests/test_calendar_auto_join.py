@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
+import time as system_time
 import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -134,6 +136,32 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
         )
         late_start = start + timedelta(hours=1)
         self.assertIsNone(scheduled_meet(self._event(late_start), now))
+
+    def test_schedule_uses_configured_meeting_timezone_not_host_timezone(self) -> None:
+        if not hasattr(system_time, "tzset"):
+            self.skipTest("Changing the host timezone requires time.tzset")
+
+        event = self._event(datetime(2026, 10, 13, 17, 0, tzinfo=UTC))
+        event["start"] = {
+            "dateTime": "2026-10-13T17:00:00+00:00",
+            "timeZone": "UTC",
+        }
+        now = datetime(2026, 10, 13, 16, 56, tzinfo=UTC)
+        original_timezone = os.environ.get("TZ")
+        try:
+            for host_timezone in ("America/Los_Angeles", "Asia/Tokyo"):
+                os.environ["TZ"] = host_timezone
+                system_time.tzset()
+                candidate = scheduled_meet(event, now)
+                self.assertIsNotNone(candidate, host_timezone)
+                assert candidate is not None
+                self.assertEqual(candidate.event_start, "2026-10-13T17:00:00+00:00")
+        finally:
+            if original_timezone is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = original_timezone
+            system_time.tzset()
 
     async def test_requests_each_occurrence_once_and_persists_bot(self) -> None:
         start = datetime(2026, 10, 13, 10, 0, tzinfo=ZoneInfo("America/Los_Angeles"))

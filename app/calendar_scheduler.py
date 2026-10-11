@@ -177,9 +177,12 @@ def calendar_meet(event: dict[str, Any]) -> ScheduledMeet | None:
     if start is None or meeting_url is None or key_and_id is None:
         return None
 
-    local_start = start.astimezone(ZoneInfo(settings.google_calendar_timezone))
+    meeting_local_start = start.astimezone(ZoneInfo(settings.google_calendar_timezone))
     target_time = time.fromisoformat(settings.google_calendar_start_time)
-    if (local_start.hour, local_start.minute) != (target_time.hour, target_time.minute):
+    if (meeting_local_start.hour, meeting_local_start.minute) != (
+        target_time.hour,
+        target_time.minute,
+    ):
         return None
     if start < datetime.now(UTC) - timedelta(
         minutes=settings.google_calendar_join_grace_minutes
