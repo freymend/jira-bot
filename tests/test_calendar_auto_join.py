@@ -117,6 +117,7 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
             "summary": "Daily Product Sync",
             "organizer": {"email": "host@example.test"},
             "start": {"dateTime": start_text},
+            "end": {"dateTime": (local_start + timedelta(hours=1)).isoformat()},
             "hangoutLink": "https://meet.google.com/abc-defg-hij",
         }
 
@@ -125,7 +126,10 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
         now = start.astimezone(UTC) - timedelta(minutes=4)
         event = self._event(start)
 
-        self.assertIsNotNone(scheduled_meet(event, now))
+        candidate = scheduled_meet(event, now)
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.event_end, "2026-10-13T18:00:00+00:00")
         self.assertIsNone(scheduled_meet({**event, "summary": "Another meeting"}, now))
         self.assertIsNone(
             scheduled_meet({**event, "organizer": {"email": "other@example.test"}}, now)
@@ -176,7 +180,10 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["status"], "requested")
         self.assertEqual(rows[0]["bot_id"], "bot-calendar-1")
-        self.assertIsNotNone(db.get_meeting("bot-calendar-1"))
+        meeting = db.get_meeting("bot-calendar-1")
+        self.assertIsNotNone(meeting)
+        assert meeting is not None
+        self.assertEqual(meeting["scheduled_end_at"], "2026-10-13T18:00:00+00:00")
 
     async def test_uncertain_create_is_not_automatically_retried(self) -> None:
         start = datetime(2026, 10, 13, 10, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -315,20 +322,18 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
             "event_key": "occurrence-key",
             "calendar_event_id": "occurrence-1",
             "event_start": "2026-10-13T17:00:00+00:00",
+            "event_end": "2026-10-13T18:00:00+00:00",
             "meeting_url": "https://meet.google.com/abc-defg-hij",
         }
         db.apply_calendar_sync("primary", [event], "sync-token-1", replace_all=True)
         self.assertEqual(db.get_calendar_sync_token("primary"), "sync-token-1")
-        self.assertEqual(
-            len(
-                db.list_due_calendar_events(
-                    "primary",
-                    "2026-10-13T16:59:00+00:00",
-                    "2026-10-13T17:01:00+00:00",
-                )
-            ),
-            1,
+        stored_events = db.list_due_calendar_events(
+            "primary",
+            "2026-10-13T16:59:00+00:00",
+            "2026-10-13T17:01:00+00:00",
         )
+        self.assertEqual(len(stored_events), 1)
+        self.assertEqual(stored_events[0]["event_end"], "2026-10-13T18:00:00+00:00")
 
         db.apply_calendar_sync(
             "primary",

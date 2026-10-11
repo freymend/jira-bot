@@ -24,7 +24,7 @@ Migration v005 creates `task_extraction_cache`. The task extractor stores succes
 
 Migration v006 creates `calendar_auto_join_requests`, which claims each calendar event occurrence before requesting an Attendee bot. Existing claims prevent duplicate bot requests, and uncertain outcomes are left for manual reconciliation rather than retried automatically. Migration v008 stores Calendar sync tokens, HTTPS watch channels, and filtered upcoming event occurrences so push notifications can be applied incrementally.
 
-Migration v007 adds per-meeting screen-frame storage and task visual-evidence metadata. Frame blobs are retained only until the configured screen-share retention period expires; task records keep timestamps, frame IDs, and summaries for review.
+Migration v007 adds per-meeting screen-frame storage and task visual-evidence metadata. Frame blobs are retained only until the configured screen-share retention period expires; task records keep timestamps, frame IDs, and summaries for review. Migration v009 stores calendar event end times and durable transcript activity / leave-decision state for the automatic meeting-leave monitor.
 
 Run the focused database tests and lint checks after a migration change:
 

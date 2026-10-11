@@ -46,17 +46,27 @@ def create_meeting(
     bot_state: str | None = None,
     *,
     screenshare_capture_enabled: bool = False,
+    scheduled_end_at: str | None = None,
 ) -> None:
     with _connect() as connection:
         connection.execute(
             """INSERT INTO meetings
-               (bot_id, meeting_url, bot_state, created_at, screenshare_capture_enabled)
-               VALUES (?, ?, ?, ?, ?)
+               (bot_id, meeting_url, bot_state, created_at, screenshare_capture_enabled,
+                scheduled_end_at)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(bot_id) DO UPDATE SET
                  meeting_url=COALESCE(excluded.meeting_url, meetings.meeting_url),
                  bot_state=COALESCE(excluded.bot_state, meetings.bot_state),
-                 screenshare_capture_enabled=excluded.screenshare_capture_enabled""",
-            (bot_id, meeting_url, bot_state, _now(), screenshare_capture_enabled),
+                 screenshare_capture_enabled=excluded.screenshare_capture_enabled,
+                 scheduled_end_at=COALESCE(excluded.scheduled_end_at, meetings.scheduled_end_at)""",
+            (
+                bot_id,
+                meeting_url,
+                bot_state,
+                _now(),
+                screenshare_capture_enabled,
+                scheduled_end_at,
+            ),
         )
 
 
@@ -160,11 +170,12 @@ def apply_calendar_sync(
                 connection.execute(
                     """INSERT INTO calendar_scheduled_events
                        (calendar_id, event_key, calendar_event_id, event_start,
-                        meeting_url, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?)
+                        event_end, meeting_url, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(calendar_id, event_key) DO UPDATE SET
                          calendar_event_id=excluded.calendar_event_id,
                          event_start=excluded.event_start,
+                         event_end=excluded.event_end,
                          meeting_url=excluded.meeting_url,
                          updated_at=excluded.updated_at""",
                     (
@@ -172,6 +183,7 @@ def apply_calendar_sync(
                         event_key,
                         change["calendar_event_id"],
                         change["event_start"],
+                        change.get("event_end"),
                         change["meeting_url"],
                         now,
                     ),
@@ -190,7 +202,7 @@ def list_due_calendar_events(
 ) -> list[dict[str, Any]]:
     with _connect() as connection:
         rows = connection.execute(
-            """SELECT event_key, calendar_event_id, event_start, meeting_url
+            """SELECT event_key, calendar_event_id, event_start, event_end, meeting_url
                FROM calendar_scheduled_events
                WHERE calendar_id=? AND event_start>=? AND event_start<=?
                ORDER BY event_start LIMIT 100""",
@@ -262,6 +274,113 @@ def update_bot_state(bot_id: str, bot_state: str) -> None:
         )
 
 
+def list_meetings_for_leave_check() -> list[dict[str, Any]]:
+    with _connect() as connection:
+        rows = connection.execute(
+            """SELECT bot_id, created_at, scheduled_end_at,
+                      last_transcript_received_at, leave_evaluated_activity_at,
+                      leave_evaluation_started_at
+               FROM meetings
+               WHERE bot_state='joined_recording' AND leave_status='not_requested'
+               ORDER BY created_at"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_recent_transcript_segments(bot_id: str, limit: int = 40) -> list[dict[str, Any]]:
+    bounded_limit = min(max(limit, 1), 100)
+    with _connect() as connection:
+        rows = connection.execute(
+            """SELECT timestamp_ms, speaker_name, text
+               FROM transcript_segments WHERE bot_id=?
+               ORDER BY rowid DESC LIMIT ?""",
+            (bot_id, bounded_limit),
+        ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+
+def claim_meeting_leave_evaluation(
+    bot_id: str, activity_at: str, *, stale_after_seconds: int = 300
+) -> bool:
+    now = datetime.now(UTC)
+    stale_before = (now - timedelta(seconds=stale_after_seconds)).isoformat()
+    with _connect() as connection:
+        result = connection.execute(
+            """UPDATE meetings SET leave_evaluation_started_at=?
+               WHERE bot_id=? AND bot_state='joined_recording'
+                 AND leave_status='not_requested'
+                 AND last_transcript_received_at=?
+                 AND (leave_evaluated_activity_at IS NULL
+                      OR leave_evaluated_activity_at != ?)
+                 AND (leave_evaluation_started_at IS NULL
+                      OR leave_evaluation_started_at < ?)""",
+            (now.isoformat(), bot_id, activity_at, activity_at, stale_before),
+        )
+        return result.rowcount == 1
+
+
+def finish_meeting_leave_evaluation(bot_id: str, activity_at: str) -> None:
+    with _connect() as connection:
+        connection.execute(
+            """UPDATE meetings
+               SET leave_evaluated_activity_at=?, leave_evaluation_started_at=NULL
+               WHERE bot_id=? AND leave_evaluation_started_at IS NOT NULL""",
+            (activity_at, bot_id),
+        )
+
+
+def claim_meeting_leave(
+    bot_id: str,
+    reason: str,
+    *,
+    expected_activity_at: str | None = None,
+    require_recording: bool = True,
+) -> bool:
+    if reason not in {"wrap_up", "maximum_runtime", "manual"}:
+        raise ValueError("Invalid meeting leave reason")
+    now = _now()
+    state_condition = " AND bot_state='joined_recording'" if require_recording else ""
+    activity_condition = (
+        " AND last_transcript_received_at=?" if expected_activity_at is not None else ""
+    )
+    parameters: tuple[Any, ...] = (reason, now, bot_id)
+    if expected_activity_at is not None:
+        parameters += (expected_activity_at,)
+    with _connect() as connection:
+        result = connection.execute(
+            """UPDATE meetings
+               SET leave_status='requesting', leave_reason=?, leave_requested_at=?
+               WHERE bot_id=? AND leave_status='not_requested'"""
+            + state_condition
+            + activity_condition,
+            parameters,
+        )
+        return result.rowcount == 1
+
+
+def finish_meeting_leave(bot_id: str, status: str) -> None:
+    if status not in {"requested", "uncertain"}:
+        raise ValueError("Invalid meeting leave status")
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE meetings SET leave_status=? WHERE bot_id=? AND leave_status='requesting'",
+            (status, bot_id),
+        )
+
+
+def mark_stale_meeting_leave_requests_uncertain(
+    *, stale_after_seconds: int = 300
+) -> int:
+    cutoff = (datetime.now(UTC) - timedelta(seconds=stale_after_seconds)).isoformat()
+    with _connect() as connection:
+        result = connection.execute(
+            """UPDATE meetings SET leave_status='uncertain'
+               WHERE leave_status='requesting' AND leave_requested_at < ?""",
+            (cutoff,),
+        )
+        return result.rowcount
+
+
 def record_webhook(
     event_id: str,
     bot_id: str,
@@ -302,6 +421,7 @@ def record_webhook(
 
 def save_segments(bot_id: str, segments: list[dict[str, Any]]) -> None:
     with _connect() as connection:
+        changed = False
         for segment in segments:
             timestamp = segment.get("timestamp_ms")
             speaker_uuid = segment.get("speaker_uuid")
@@ -315,7 +435,7 @@ def save_segments(bot_id: str, segments: list[dict[str, Any]]) -> None:
             text = str(segment.get("text", "")).strip()
             if not text:
                 continue
-            connection.execute(
+            result = connection.execute(
                 """INSERT INTO transcript_segments
                    (bot_id, segment_key, timestamp_ms, speaker_name, speaker_uuid, text, raw_json)
                    VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -324,7 +444,12 @@ def save_segments(bot_id: str, segments: list[dict[str, Any]]) -> None:
                      speaker_name=excluded.speaker_name,
                      speaker_uuid=excluded.speaker_uuid,
                      text=excluded.text,
-                     raw_json=excluded.raw_json""",
+                     raw_json=excluded.raw_json
+                   WHERE transcript_segments.timestamp_ms IS NOT excluded.timestamp_ms
+                      OR transcript_segments.speaker_name IS NOT excluded.speaker_name
+                      OR transcript_segments.speaker_uuid IS NOT excluded.speaker_uuid
+                      OR transcript_segments.text IS NOT excluded.text
+                      OR transcript_segments.raw_json IS NOT excluded.raw_json""",
                 (
                     bot_id,
                     key,
@@ -335,11 +460,17 @@ def save_segments(bot_id: str, segments: list[dict[str, Any]]) -> None:
                     json.dumps(segment.get("raw", segment), ensure_ascii=False),
                 ),
             )
+            changed = changed or result.rowcount == 1
         connection.execute(
             """UPDATE meetings SET transcription_state='in_progress'
                WHERE bot_id=? AND transcription_state!='complete'""",
             (bot_id,),
         )
+        if changed:
+            connection.execute(
+                "UPDATE meetings SET last_transcript_received_at=? WHERE bot_id=?",
+                (_now(), bot_id),
+            )
 
 
 def save_final_transcript(bot_id: str, segments: list[dict[str, Any]]) -> None:

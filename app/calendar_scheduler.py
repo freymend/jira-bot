@@ -76,26 +76,32 @@ class ScheduledMeet:
     event_id: str
     event_start: str
     meeting_url: str
+    event_end: str | None = None
 
 
-def _parse_event_start(event: dict[str, Any]) -> datetime | None:
-    start = event.get("start")
-    if not isinstance(start, dict):
-        return None
-    value = start.get("dateTime")
-    if not isinstance(value, str):
+def _parse_event_datetime(event: dict[str, Any], key: str) -> datetime | None:
+    value = event.get(key)
+    if not isinstance(value, dict) or not isinstance(value.get("dateTime"), str):
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value["dateTime"].replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(
                 tzinfo=ZoneInfo(
-                    str(start.get("timeZone") or settings.google_calendar_timezone)
+                    str(value.get("timeZone") or settings.google_calendar_timezone)
                 )
             )
         return parsed
-    except ValueError, KeyError:
+    except (ValueError, KeyError):
         return None
+
+
+def _parse_event_start(event: dict[str, Any]) -> datetime | None:
+    return _parse_event_datetime(event, "start")
+
+
+def _parse_event_end(event: dict[str, Any]) -> datetime | None:
+    return _parse_event_datetime(event, "end")
 
 
 def _meet_url(event: dict[str, Any]) -> str | None:
@@ -190,11 +196,13 @@ def calendar_meet(event: dict[str, Any]) -> ScheduledMeet | None:
         return None
 
     event_key, event_id = key_and_id
+    event_end = _parse_event_end(event)
     return ScheduledMeet(
         event_key=event_key,
         event_id=event_id,
         event_start=start.astimezone(UTC).isoformat(),
         meeting_url=meeting_url,
+        event_end=(event_end.astimezone(UTC).isoformat() if event_end else None),
     )
 
 
@@ -233,6 +241,7 @@ async def _request_candidates(
                 candidate.meeting_url,
                 bot.get("state"),
                 screenshare_capture_enabled=settings.screenshare_capture_enabled,
+                scheduled_end_at=candidate.event_end,
             )
             db.finish_calendar_auto_join(
                 candidate.event_key, "requested", bot_id=bot_id
@@ -285,6 +294,7 @@ async def request_stored_due_meetings(
             event_id=str(row["calendar_event_id"]),
             event_start=str(row["event_start"]),
             meeting_url=str(row["meeting_url"]),
+            event_end=(str(row["event_end"]) if row.get("event_end") else None),
         )
         for row in rows
     ]
@@ -377,6 +387,7 @@ def _calendar_sync_change(
             "event_key": event_key,
             "calendar_event_id": event_id,
             "event_start": candidate.event_start,
+            "event_end": candidate.event_end,
             "meeting_url": candidate.meeting_url,
         }
     if full_sync:

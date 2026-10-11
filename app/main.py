@@ -44,20 +44,29 @@ logger = logging.getLogger("jira-bot")
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     db.init_db()
     db.delete_expired_screen_frames()
-    calendar_task: asyncio.Task[None] | None = None
+    background_tasks: list[asyncio.Task[None]] = []
     if settings.google_calendar_auto_join_enabled:
         calendar_sync_wakeup = asyncio.Event()
-        calendar_task = asyncio.create_task(
-            run_calendar_auto_join(attendee, calendar_sync_wakeup),
-            name="google-calendar-auto-join",
+        background_tasks.append(
+            asyncio.create_task(
+                run_calendar_auto_join(attendee, calendar_sync_wakeup),
+                name="google-calendar-auto-join",
+            )
+        )
+    if settings.meeting_auto_leave_enabled:
+        background_tasks.append(
+            asyncio.create_task(
+                run_meeting_leave_monitor(attendee), name="meeting-auto-leave"
+            )
         )
     try:
         yield
     finally:
-        if calendar_task is not None:
-            calendar_task.cancel()
+        for task in background_tasks:
+            task.cancel()
+        for task in background_tasks:
             try:
-                await calendar_task
+                await task
             except asyncio.CancelledError:
                 pass
         await attendee.close()
@@ -172,11 +181,27 @@ async def start_meeting(body: MeetingStartRequest) -> dict[str, Any]:
 
 @app.post("/meetings/{bot_id}/leave", dependencies=[Depends(require_app_auth)])
 async def leave_meeting(bot_id: str) -> dict[str, Any]:
+    claimed = db.claim_meeting_leave(
+        bot_id, "manual", require_recording=False
+    )
+    if not claimed:
+        meeting = db.get_meeting(bot_id)
+        if meeting is not None and meeting["leave_status"] in {
+            "requesting",
+            "requested",
+            "uncertain",
+        }:
+            return {"ok": True, "status": meeting["leave_status"]}
     try:
-        return await attendee.leave_bot(bot_id)
+        result = await attendee.leave_bot(bot_id)
     except Exception as exc:
+        if claimed:
+            db.finish_meeting_leave(bot_id, "uncertain")
         logger.exception("Could not ask Attendee bot to leave")
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if claimed:
+        db.finish_meeting_leave(bot_id, "requested")
+    return result
 
 
 @app.get("/meetings/{bot_id}", dependencies=[Depends(require_app_auth)])
@@ -267,9 +292,11 @@ async def attendee_webhook(
     event_data = payload.get("data") or {}
     if trigger == "bot.state_change" and isinstance(event_data, dict):
         new_state = event_data.get("new_state")
-        if new_state:
+        if _event_is_final(payload):
+            db.update_bot_state(bot_id, "post_processing_completed")
+        elif new_state:
             db.update_bot_state(bot_id, str(new_state))
-        if new_state == "joined_recording":
+        if not _event_is_final(payload) and new_state == "joined_recording":
             recording_started_at_ms = _timestamp_ms(event_data.get("created_at"))
             if recording_started_at_ms is not None:
                 db.set_recording_started_at(bot_id, recording_started_at_ms)

@@ -76,6 +76,11 @@ class Settings:
     google_calendar_poll_seconds: int
     google_calendar_join_lead_minutes: int
     google_calendar_join_grace_minutes: int
+    meeting_auto_leave_enabled: bool
+    meeting_leave_quiet_seconds: int
+    meeting_leave_max_overrun_minutes: int
+    meeting_leave_max_runtime_minutes: int
+    meeting_leave_confidence_threshold: float
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -115,6 +120,19 @@ class Settings:
         calendar_join_grace_minutes = int(
             os.getenv("GOOGLE_CALENDAR_JOIN_GRACE_MINUTES", "2")
         )
+        meeting_auto_leave_enabled = _bool("MEETING_AUTO_LEAVE_ENABLED", True)
+        meeting_leave_quiet_seconds = int(
+            os.getenv("MEETING_LEAVE_QUIET_SECONDS", "90")
+        )
+        meeting_leave_max_overrun_minutes = int(
+            os.getenv("MEETING_LEAVE_MAX_OVERRUN_MINUTES", "60")
+        )
+        meeting_leave_max_runtime_minutes = int(
+            os.getenv("MEETING_LEAVE_MAX_RUNTIME_MINUTES", "120")
+        )
+        meeting_leave_confidence_threshold = float(
+            os.getenv("MEETING_LEAVE_CONFIDENCE_THRESHOLD", "0.9")
+        )
         try:
             datetime_time.fromisoformat(calendar_start_time)
             ZoneInfo(calendar_timezone)
@@ -128,6 +146,14 @@ class Settings:
             raise RuntimeError("GOOGLE_CALENDAR_JOIN_LEAD_MINUTES must be 1-30")
         if not 0 <= calendar_join_grace_minutes <= 15:
             raise RuntimeError("GOOGLE_CALENDAR_JOIN_GRACE_MINUTES must be 0-15")
+        if not 30 <= meeting_leave_quiet_seconds <= 1800:
+            raise RuntimeError("MEETING_LEAVE_QUIET_SECONDS must be 30-1800")
+        if not 0 <= meeting_leave_max_overrun_minutes <= 720:
+            raise RuntimeError("MEETING_LEAVE_MAX_OVERRUN_MINUTES must be 0-720")
+        if not 15 <= meeting_leave_max_runtime_minutes <= 1440:
+            raise RuntimeError("MEETING_LEAVE_MAX_RUNTIME_MINUTES must be 15-1440")
+        if not 0.5 <= meeting_leave_confidence_threshold <= 1:
+            raise RuntimeError("MEETING_LEAVE_CONFIDENCE_THRESHOLD must be 0.5-1")
         if calendar_auto_join_enabled:
             required_calendar_values = {
                 "GOOGLE_CALENDAR_CLIENT_ID": calendar_client_id,
@@ -187,6 +213,10 @@ class Settings:
             ).rstrip("/"),
             attendee_bot_name=os.getenv("ATTENDEE_BOT_NAME", "Jira Meeting Assistant"),
             mlx_transcriber_api_key=os.getenv("MLX_TRANSCRIBER_API_KEY", ""),
+            mlx_transcriber_health_url=os.getenv(
+                "MLX_TRANSCRIBER_HEALTH_URL",
+                "http://host.docker.internal:8101/health",
+            ).rstrip("/"),
             mlx_whisper_language=os.getenv("MLX_WHISPER_LANGUAGE", "").strip(),
             llm_base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:8100/v1").rstrip(
                 "/"
@@ -227,6 +257,11 @@ class Settings:
             google_calendar_poll_seconds=calendar_poll_seconds,
             google_calendar_join_lead_minutes=calendar_join_lead_minutes,
             google_calendar_join_grace_minutes=calendar_join_grace_minutes,
+            meeting_auto_leave_enabled=meeting_auto_leave_enabled,
+            meeting_leave_quiet_seconds=meeting_leave_quiet_seconds,
+            meeting_leave_max_overrun_minutes=meeting_leave_max_overrun_minutes,
+            meeting_leave_max_runtime_minutes=meeting_leave_max_runtime_minutes,
+            meeting_leave_confidence_threshold=meeting_leave_confidence_threshold,
         )
 
 

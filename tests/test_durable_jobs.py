@@ -113,12 +113,21 @@ class DurableJobTests(unittest.TestCase):
             self.assertIn("bot_state", meeting_columns)
             self.assertTrue(
                 {
+                    "scheduled_end_at",
+                    "last_transcript_received_at",
+                    "leave_status",
+                    "leave_requested_at",
+                    "leave_reason",
+                }.issubset(meeting_columns)
+            )
+            self.assertTrue(
+                {
                     "owner_evidence_quote",
                     "owner_timestamp_ms",
                     "context_evidence_json",
                 }.issubset(task_columns)
             )
-            self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8])
+            self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9])
             self.assertEqual(jobs, 1)
             self.assertIsNotNone(cache_table)
             self.assertIsNotNone(calendar_join_table)
