@@ -13,6 +13,10 @@ from .v006_calendar_auto_join import migrate as _create_calendar_auto_join_reque
 from .v007_screenshare_evidence import migrate as _create_screenshare_evidence
 from .v008_calendar_push_sync import migrate as _create_calendar_push_sync
 from .v009_meeting_auto_leave import migrate as _add_meeting_auto_leave
+from .v010_meeting_participant_presence import (
+    migrate as _add_meeting_participant_presence,
+)
+from .v011_meeting_leave_retries import migrate as _add_meeting_leave_retries
 
 
 def _now() -> str:
@@ -30,6 +34,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     (7, _create_screenshare_evidence),
     (8, _create_calendar_push_sync),
     (9, _add_meeting_auto_leave),
+    (10, _add_meeting_participant_presence),
+    (11, _add_meeting_leave_retries),
 )
 
 

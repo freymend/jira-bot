@@ -393,6 +393,10 @@ class ScreenShareBotConfigurationTests(unittest.IsolatedAsyncioTestCase):
             await client.create_bot("https://meet.google.com/abc-defg-hij")
         assert post.await_args is not None
         request_body = post.await_args.kwargs["json"]
+        self.assertIn(
+            "participant_events.join_leave",
+            request_body["webhooks"][0]["triggers"],
+        )
         video = request_body["websocket_settings"]["per_participant_video"]
         self.assertEqual(video["webcam_resolution"], "none")
         self.assertEqual(video["screenshare_resolution"], "720p")

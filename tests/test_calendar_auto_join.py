@@ -184,6 +184,7 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(meeting)
         assert meeting is not None
         self.assertEqual(meeting["scheduled_end_at"], "2026-10-13T18:00:00+00:00")
+        self.assertEqual(meeting["participant_tracking_enabled"], 1)
 
     async def test_uncertain_create_is_not_automatically_retried(self) -> None:
         start = datetime(2026, 10, 13, 10, 0, tzinfo=ZoneInfo("America/Los_Angeles"))

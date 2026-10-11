@@ -92,7 +92,7 @@ def _parse_event_datetime(event: dict[str, Any], key: str) -> datetime | None:
                 )
             )
         return parsed
-    except (ValueError, KeyError):
+    except ValueError, KeyError:
         return None
 
 
@@ -242,6 +242,7 @@ async def _request_candidates(
                 bot.get("state"),
                 screenshare_capture_enabled=settings.screenshare_capture_enabled,
                 scheduled_end_at=candidate.event_end,
+                participant_tracking_enabled=True,
             )
             db.finish_calendar_auto_join(
                 candidate.event_key, "requested", bot_id=bot_id

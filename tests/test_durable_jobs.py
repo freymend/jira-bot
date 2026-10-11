@@ -109,6 +109,14 @@ class DurableJobTests(unittest.TestCase):
                                             'calendar_scheduled_events')"""
                         )
                     }
+                    participant_tables = {
+                        row["name"]
+                        for row in connection.execute(
+                            """SELECT name FROM sqlite_master WHERE type='table'
+                               AND name IN ('meeting_participants',
+                                            'meeting_participant_events')"""
+                        )
+                    }
 
             self.assertIn("bot_state", meeting_columns)
             self.assertTrue(
@@ -118,6 +126,10 @@ class DurableJobTests(unittest.TestCase):
                     "leave_status",
                     "leave_requested_at",
                     "leave_reason",
+                    "participant_tracking_enabled",
+                    "participant_presence_initialized",
+                    "last_participant_event_at",
+                    "leave_attempt_count",
                 }.issubset(meeting_columns)
             )
             self.assertTrue(
@@ -127,7 +139,7 @@ class DurableJobTests(unittest.TestCase):
                     "context_evidence_json",
                 }.issubset(task_columns)
             )
-            self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9])
+            self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
             self.assertEqual(jobs, 1)
             self.assertIsNotNone(cache_table)
             self.assertIsNotNone(calendar_join_table)
@@ -138,6 +150,10 @@ class DurableJobTests(unittest.TestCase):
                     "calendar_watch_channels",
                     "calendar_scheduled_events",
                 },
+            )
+            self.assertEqual(
+                participant_tables,
+                {"meeting_participants", "meeting_participant_events"},
             )
 
     def test_final_webhook_queues_once_and_expired_lease_is_reclaimed(self) -> None:

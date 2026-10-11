@@ -75,7 +75,11 @@ class AttendeeClient:
             "webhooks": [
                 {
                     "url": f"{settings.app_public_url}/webhooks/attendee",
-                    "triggers": ["bot.state_change", "transcript.update"],
+                    "triggers": [
+                        "bot.state_change",
+                        "transcript.update",
+                        "participant_events.join_leave",
+                    ],
                 }
             ],
         }
@@ -105,6 +109,14 @@ class AttendeeClient:
         response = await self.client.post(f"bots/{bot_id}/leave")
         response.raise_for_status()
         return response.json() if response.content else {"ok": True}
+
+    async def get_bot(self, bot_id: str) -> dict[str, Any]:
+        response = await self.client.get(f"bots/{bot_id}")
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Attendee returned an invalid bot response")
+        return payload
 
     async def get_transcript(self, bot_id: str) -> Any:
         response = await self.client.get(

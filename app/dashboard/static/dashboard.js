@@ -2,7 +2,7 @@
 /** @typedef {{name: string, status: ServiceStatus, detail?: string}} DashboardService */
 /** @typedef {{bot_id: string, meeting_url?: string|null, created_at?: string|null, bot_state?: string|null, transcription_state?: string|null, status?: string|null, task_count: number, error?: string|null}} RecentMeeting */
 /** @typedef {{event_id: string, event_title: string, event_start: string, event_end?: string|null, meeting_url: string, join_status: string, bot_id?: string|null, error?: string|null}} ScheduledCalendarJoin */
-/** @typedef {{enabled: boolean, event_title_filter?: string|null, time_zone?: string, upcoming_events: ScheduledCalendarJoin[]}} CalendarDashboardData */
+/** @typedef {{enabled: boolean, event_title_filter?: string|null, time_zone?: string, source?: string, error?: string|null, upcoming_events: ScheduledCalendarJoin[]}} CalendarDashboardData */
 /** @typedef {{status: "healthy"|"degraded", updated_at: string, services: DashboardService[], recent_meetings: RecentMeeting[], calendar: CalendarDashboardData}} DashboardOverview */
 /** @typedef {{key: string, label: string, group: string, type: "secret"|"url"|"integer"|"number"|"boolean"|"json"|"text", help?: string}} ConfigField */
 /** @typedef {{fields: ConfigField[], values: Record<string, string>, secret_configured: Record<string, boolean>}} DashboardConfig */
@@ -101,16 +101,18 @@ function renderCalendarEvents(calendar) {
   body.replaceChildren();
   const events = calendar?.upcoming_events || [];
   element("calendar-summary").textContent = calendar?.enabled
-    ? `${calendar.event_title_filter || "All eligible events"} · ${calendar.time_zone || "calendar time zone"} · next 14 days`
+    ? `${calendar.event_title_filter || "All eligible events"} · ${calendar.time_zone || "calendar time zone"} · next 14 days${calendar.source ? ` · ${calendar.source.replaceAll("_", " ")}` : ""}`
     : "Calendar auto-join is disabled";
   if (!calendar?.enabled || events.length === 0) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
     cell.colSpan = 5;
     cell.className = "empty";
-    cell.textContent = calendar?.enabled
-      ? "No eligible calendar events are currently scheduled."
-      : "Enable Google Calendar auto-join in Configuration to view scheduled joins.";
+    cell.textContent = calendar?.error
+      ? calendar.error
+      : calendar?.enabled
+        ? "No eligible calendar events are currently scheduled."
+        : "Enable Google Calendar auto-join in Configuration to view scheduled joins.";
     row.append(cell);
     body.append(row);
     return;

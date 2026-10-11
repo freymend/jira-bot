@@ -29,10 +29,12 @@ import httpx
 from app import db
 from app.calendar_scheduler import (
     accept_calendar_notification,
+    calendar_meet,
     run_calendar_auto_join,
 )
 from app.config import settings
 from app.integrations.attendee import verify_attendee_signature
+from app.integrations.google_calendar import GoogleCalendarClient
 from app.integrations.transcript import normalize_segments
 from app.meeting_lifecycle import run_meeting_leave_monitor
 from app.pipeline import attendee
@@ -120,6 +122,114 @@ async def _probe_service(
     return "healthy" if response.is_success else "unavailable"
 
 
+_DASHBOARD_CALENDAR_CACHE: tuple[str, float, list[dict[str, Any]]] | None = None
+
+
+def _calendar_cache_key() -> str:
+    return "\n".join(
+        (
+            settings.google_calendar_id,
+            settings.google_calendar_event_title,
+            settings.google_calendar_organizer_email,
+            settings.google_calendar_timezone,
+            settings.google_calendar_start_time,
+            str(settings.google_calendar_join_grace_minutes),
+        )
+    )
+
+
+def _calendar_event_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    attempts = {
+        (str(item["calendar_event_id"]), str(item["event_start"])): item
+        for item in db.list_calendar_auto_joins(limit=100)
+    }
+    result: list[dict[str, Any]] = []
+    for event in rows:
+        attempt = attempts.get(
+            (str(event["calendar_event_id"]), str(event["event_start"])), {}
+        )
+        result.append(
+            {
+                "event_id": event["calendar_event_id"],
+                "event_title": settings.google_calendar_event_title,
+                "event_start": event["event_start"],
+                "event_end": event.get("event_end"),
+                "meeting_url": event["meeting_url"],
+                "join_status": attempt.get("status", "scheduled"),
+                "bot_id": attempt.get("bot_id"),
+                "error": attempt.get("error"),
+            }
+        )
+    return result
+
+
+async def _dashboard_calendar_schedule(
+    now: datetime,
+) -> tuple[list[dict[str, Any]], str, str | None]:
+    global _DASHBOARD_CALENDAR_CACHE
+    if not settings.google_calendar_auto_join_enabled:
+        return [], "disabled", None
+
+    start_at = now.isoformat()
+    end_at = (now + timedelta(days=14)).isoformat()
+    watch = db.get_current_calendar_watch(settings.google_calendar_id)
+    push_is_active = watch is not None and int(watch["expiration_ms"]) > int(
+        now.timestamp() * 1000
+    )
+    stored_rows = db.list_due_calendar_events(
+        settings.google_calendar_id, start_at, end_at
+    )
+    if push_is_active and stored_rows:
+        return _calendar_event_rows(stored_rows), "push_sync", None
+
+    cache_key = _calendar_cache_key()
+    if (
+        _DASHBOARD_CALENDAR_CACHE is not None
+        and _DASHBOARD_CALENDAR_CACHE[0] == cache_key
+        and _DASHBOARD_CALENDAR_CACHE[1] > time.monotonic()
+    ):
+        cached = _DASHBOARD_CALENDAR_CACHE[2]
+        return cached, "calendar_api_cache", None
+
+    calendar = GoogleCalendarClient()
+    try:
+        events = await calendar.list_events(now, now + timedelta(days=14))
+        scheduled = [
+            candidate
+            for event in events
+            if (candidate := calendar_meet(event)) is not None
+        ]
+        rows = [
+            {
+                "calendar_event_id": candidate.event_id,
+                "event_start": candidate.event_start,
+                "event_end": candidate.event_end,
+                "meeting_url": candidate.meeting_url,
+            }
+            for candidate in scheduled
+        ]
+        result = _calendar_event_rows(rows)
+        _DASHBOARD_CALENDAR_CACHE = (
+            cache_key,
+            time.monotonic() + 60,
+            result,
+        )
+        return result, "calendar_api", None
+    except Exception:
+        logger.warning(
+            "Could not refresh upcoming Google Calendar events for the dashboard",
+            exc_info=True,
+        )
+        fallback = _calendar_event_rows(stored_rows)
+        return (
+            fallback,
+            "push_sync" if push_is_active else "unavailable",
+            "Calendar refresh failed; showing any last-synchronized events.",
+        )
+    finally:
+        await calendar.close()
+
+
 @app.get("/dashboard/api/overview", dependencies=[Depends(require_app_auth)])
 async def dashboard_overview(limit: int = 25) -> dict[str, Any]:
     local_checks = db.health_checks()
@@ -181,40 +291,22 @@ async def dashboard_overview(limit: int = 25) -> dict[str, Any]:
             ),
         },
     ]
-    critical_statuses = {"healthy"}
-    overall_status = (
-        "healthy"
-        if all(service["status"] in critical_statuses for service in services[:6])
-        else "degraded"
-    )
     now = datetime.now(UTC)
-    calendar_events: list[dict[str, Any]] = []
+    calendar_events, calendar_source, calendar_error = (
+        await _dashboard_calendar_schedule(now)
+    )
+    calendar_service = services[-1]
     if settings.google_calendar_auto_join_enabled:
-        event_rows = db.list_due_calendar_events(
-            settings.google_calendar_id,
-            now.isoformat(),
-            (now + timedelta(days=14)).isoformat(),
+        calendar_service["status"] = "unavailable" if calendar_error else "healthy"
+        calendar_service["detail"] = (
+            calendar_error or f"Upcoming events loaded from {calendar_source}."
         )
-        attempts = {
-            (str(item["calendar_event_id"]), str(item["event_start"])): item
-            for item in db.list_calendar_auto_joins(limit=100)
-        }
-        for event in event_rows:
-            attempt = attempts.get(
-                (str(event["calendar_event_id"]), str(event["event_start"])), {}
-            )
-            calendar_events.append(
-                {
-                    "event_id": event["calendar_event_id"],
-                    "event_title": settings.google_calendar_event_title,
-                    "event_start": event["event_start"],
-                    "event_end": event.get("event_end"),
-                    "meeting_url": event["meeting_url"],
-                    "join_status": attempt.get("status", "scheduled"),
-                    "bot_id": attempt.get("bot_id"),
-                    "error": attempt.get("error"),
-                }
-            )
+    critical_statuses = {"healthy"}
+    services_healthy = all(
+        service["status"] in critical_statuses for service in services[:6]
+    )
+    calendar_healthy = not settings.google_calendar_auto_join_enabled or not calendar_error
+    overall_status = "healthy" if services_healthy and calendar_healthy else "degraded"
     return {
         "status": overall_status,
         "updated_at": now.isoformat(),
@@ -224,6 +316,8 @@ async def dashboard_overview(limit: int = 25) -> dict[str, Any]:
             "enabled": settings.google_calendar_auto_join_enabled,
             "event_title_filter": settings.google_calendar_event_title or None,
             "time_zone": settings.google_calendar_timezone,
+            "source": calendar_source,
+            "error": calendar_error,
             "upcoming_events": calendar_events,
         },
     }
@@ -293,6 +387,7 @@ async def start_meeting(body: MeetingStartRequest) -> dict[str, Any]:
         str(body.meeting_url),
         bot.get("state"),
         screenshare_capture_enabled=screen_share_capture,
+        participant_tracking_enabled=True,
     )
     return {
         "bot_id": bot_id,
@@ -304,9 +399,7 @@ async def start_meeting(body: MeetingStartRequest) -> dict[str, Any]:
 
 @app.post("/meetings/{bot_id}/leave", dependencies=[Depends(require_app_auth)])
 async def leave_meeting(bot_id: str) -> dict[str, Any]:
-    claimed = db.claim_meeting_leave(
-        bot_id, "manual", require_recording=False
-    )
+    claimed = db.claim_meeting_leave(bot_id, "manual", require_recording=False)
     if not claimed:
         meeting = db.get_meeting(bot_id)
         if meeting is not None and meeting["leave_status"] in {
@@ -405,13 +498,15 @@ async def attendee_webhook(
             json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest()
     )
-    db.record_webhook(
+    recorded = db.record_webhook(
         event_id,
         bot_id,
         trigger,
         payload,
         enqueue_finalization=_event_is_final(payload),
     )
+    if not recorded:
+        return {"status": "received"}
     event_data = payload.get("data") or {}
     if trigger == "bot.state_change" and isinstance(event_data, dict):
         new_state = event_data.get("new_state")
@@ -426,6 +521,38 @@ async def attendee_webhook(
     if trigger == "transcript.update":
         segment = normalize_segments(event_data)
         db.save_segments(bot_id, segment)
+    if trigger == "participant_events.join_leave" and isinstance(event_data, dict):
+        participant_uuid = event_data.get("participant_uuid")
+        event_type = event_data.get("event_type")
+        timestamp_ms = event_data.get("timestamp_ms")
+        if (
+            isinstance(participant_uuid, str)
+            and participant_uuid.strip()
+            and event_type in {"join", "leave"}
+            and isinstance(timestamp_ms, int)
+            and not isinstance(timestamp_ms, bool)
+            and 0 <= timestamp_ms <= 2**63 - 1
+        ):
+            participant_event_id = event_data.get("id") or payload.get(
+                "idempotency_key"
+            )
+            if not isinstance(participant_event_id, str) or not participant_event_id:
+                participant_event_id = hashlib.sha256(
+                    json.dumps(event_data, sort_keys=True, ensure_ascii=False).encode(
+                        "utf-8"
+                    )
+                ).hexdigest()
+            participant_name = event_data.get("participant_name")
+            is_host = event_data.get("participant_is_host")
+            db.record_participant_event(
+                bot_id,
+                participant_event_id[:255],
+                participant_uuid.strip()[:255],
+                participant_name[:255] if isinstance(participant_name, str) else None,
+                is_host if isinstance(is_host, bool) else None,
+                event_type,
+                timestamp_ms,
+            )
     return {"status": "received"}
 
 
