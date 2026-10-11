@@ -28,6 +28,7 @@ def _connect() -> Generator[sqlite3.Connection, None, None]:
     try:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA secure_delete=ON")
         with connection:
             yield connection
     finally:
@@ -40,16 +41,22 @@ def init_db() -> None:
 
 
 def create_meeting(
-    bot_id: str, meeting_url: str | None, bot_state: str | None = None
+    bot_id: str,
+    meeting_url: str | None,
+    bot_state: str | None = None,
+    *,
+    screenshare_capture_enabled: bool = False,
 ) -> None:
     with _connect() as connection:
         connection.execute(
-            """INSERT INTO meetings(bot_id, meeting_url, bot_state, created_at)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO meetings
+               (bot_id, meeting_url, bot_state, created_at, screenshare_capture_enabled)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(bot_id) DO UPDATE SET
                  meeting_url=COALESCE(excluded.meeting_url, meetings.meeting_url),
-                 bot_state=COALESCE(excluded.bot_state, meetings.bot_state)""",
-            (bot_id, meeting_url, bot_state, _now()),
+                 bot_state=COALESCE(excluded.bot_state, meetings.bot_state),
+                 screenshare_capture_enabled=excluded.screenshare_capture_enabled""",
+            (bot_id, meeting_url, bot_state, _now(), screenshare_capture_enabled),
         )
 
 
@@ -85,9 +92,7 @@ def finish_calendar_auto_join(
         )
 
 
-def mark_stale_calendar_auto_joins_uncertain(
-    *, stale_after_seconds: int = 300
-) -> int:
+def mark_stale_calendar_auto_joins_uncertain(*, stale_after_seconds: int = 300) -> int:
     cutoff = (datetime.now(UTC) - timedelta(seconds=stale_after_seconds)).isoformat()
     with _connect() as connection:
         result = connection.execute(
@@ -122,22 +127,27 @@ def get_calendar_sync_token(calendar_id: str) -> str | None:
         return str(row["sync_token"]) if row is not None else None
 
 
-def reset_calendar_sync(calendar_id: str) -> None:
+def clear_calendar_sync_token(calendar_id: str) -> None:
     with _connect() as connection:
-        connection.execute(
-            "DELETE FROM calendar_scheduled_events WHERE calendar_id=?",
-            (calendar_id,),
-        )
         connection.execute(
             "DELETE FROM calendar_sync_state WHERE calendar_id=?", (calendar_id,)
         )
 
 
 def apply_calendar_sync(
-    calendar_id: str, changes: list[dict[str, Any]], sync_token: str
+    calendar_id: str,
+    changes: list[dict[str, Any]],
+    sync_token: str,
+    *,
+    replace_all: bool = False,
 ) -> None:
     now = _now()
     with _connect() as connection:
+        if replace_all:
+            connection.execute(
+                "DELETE FROM calendar_scheduled_events WHERE calendar_id=?",
+                (calendar_id,),
+            )
         for change in changes:
             event_key = change["event_key"]
             if change["action"] == "delete":
@@ -378,11 +388,12 @@ def store_screen_frame(
     with _connect() as connection:
         connection.execute("DELETE FROM screen_frames WHERE created_at < ?", (cutoff,))
         meeting = connection.execute(
-            """SELECT recording_started_at_ms, screen_frame_origin_ms
+            """SELECT recording_started_at_ms, screen_frame_origin_ms,
+                      screenshare_capture_enabled
                FROM meetings WHERE bot_id=?""",
             (bot_id,),
         ).fetchone()
-        if meeting is None:
+        if meeting is None or not meeting["screenshare_capture_enabled"]:
             return None
         last_frame = connection.execute(
             """SELECT received_at_ms FROM screen_frames
@@ -401,7 +412,9 @@ def store_screen_frame(
             return None
 
         origin = meeting["recording_started_at_ms"] or meeting["screen_frame_origin_ms"]
-        time_source = "recording_state" if meeting["recording_started_at_ms"] else "first_frame"
+        time_source = (
+            "recording_state" if meeting["recording_started_at_ms"] else "first_frame"
+        )
         if origin is None:
             origin = received_at_ms
             connection.execute(
@@ -786,14 +799,13 @@ def set_task_status(
         )
 
 
-def meeting_exists(bot_id: str) -> bool:
+def is_screenshare_capture_enabled(bot_id: str) -> bool:
     with _connect() as connection:
-        return (
-            connection.execute(
-                "SELECT 1 FROM meetings WHERE bot_id=?", (bot_id,)
-            ).fetchone()
-            is not None
-        )
+        row = connection.execute(
+            "SELECT screenshare_capture_enabled FROM meetings WHERE bot_id=?",
+            (bot_id,),
+        ).fetchone()
+        return row is not None and bool(row["screenshare_capture_enabled"])
 
 
 def get_meeting(bot_id: str) -> dict[str, Any] | None:

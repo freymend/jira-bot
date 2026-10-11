@@ -100,6 +100,15 @@ class DurableJobTests(unittest.TestCase):
                         """SELECT name FROM sqlite_master
                            WHERE type='table' AND name='calendar_auto_join_requests'"""
                     ).fetchone()
+                    calendar_sync_tables = {
+                        row["name"]
+                        for row in connection.execute(
+                            """SELECT name FROM sqlite_master WHERE type='table'
+                               AND name IN ('calendar_sync_state',
+                                            'calendar_watch_channels',
+                                            'calendar_scheduled_events')"""
+                        )
+                    }
 
             self.assertIn("bot_state", meeting_columns)
             self.assertTrue(
@@ -113,6 +122,14 @@ class DurableJobTests(unittest.TestCase):
             self.assertEqual(jobs, 1)
             self.assertIsNotNone(cache_table)
             self.assertIsNotNone(calendar_join_table)
+            self.assertEqual(
+                calendar_sync_tables,
+                {
+                    "calendar_sync_state",
+                    "calendar_watch_channels",
+                    "calendar_scheduled_events",
+                },
+            )
 
     def test_final_webhook_queues_once_and_expired_lease_is_reclaimed(self) -> None:
         payload = {"trigger": "bot.state_change", "bot_id": "bot-1"}

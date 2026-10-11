@@ -9,7 +9,7 @@ Schema migrations live in this directory and are applied during `db.init_db()` b
 3. Import the function in [`__init__.py`](./__init__.py) and append `(version, migrate_function)` to `MIGRATIONS`.
 4. Add or update a regression test that initializes a temporary database representing the relevant starting schema. The upgrade/idempotency test is in [`test_durable_jobs.py`](../../tests/test_durable_jobs.py).
 
-For example, the next module could be `v007_add_example_field.py`, registered after version 6. Never reuse, renumber, reorder, or edit a migration that may already have run in a deployed database; add a new version for follow-up changes.
+For example, the next module could be `v009_add_example_field.py`, registered after version 8. Never reuse, renumber, reorder, or edit a migration that may already have run in a deployed database; add a new version for follow-up changes.
 
 ## Transaction and compatibility rules
 
@@ -21,6 +21,10 @@ For example, the next module could be `v007_add_example_field.py`, registered af
 ## Extraction checkpoints
 
 Migration v005 creates `task_extraction_cache`. The task extractor stores successful chunk results and per-task context results there, keyed by meeting, a transcript/model/budget hash, and a stage key. A retry can therefore resume after the last successful model call; changing the transcript, configured model, or context budget starts a fresh cache. Old cache rows for that meeting are removed when a new transcript hash is processed. Bump `_CACHE_VERSION` in `task_extraction.py` when changing prompts, chunking/compaction behavior, or cached-result interpretation.
+
+Migration v006 creates `calendar_auto_join_requests`, which claims each calendar event occurrence before requesting an Attendee bot. Existing claims prevent duplicate bot requests, and uncertain outcomes are left for manual reconciliation rather than retried automatically. Migration v008 stores Calendar sync tokens, HTTPS watch channels, and filtered upcoming event occurrences so push notifications can be applied incrementally.
+
+Migration v007 adds per-meeting screen-frame storage and task visual-evidence metadata. Frame blobs are retained only until the configured screen-share retention period expires; task records keep timestamps, frame IDs, and summaries for review.
 
 Run the focused database tests and lint checks after a migration change:
 

@@ -11,6 +11,7 @@ from .v004_backfill_finalization_jobs import migrate as _backfill_finalization_j
 from .v005_task_extraction_cache import migrate as _create_task_extraction_cache
 from .v006_calendar_auto_join import migrate as _create_calendar_auto_join_requests
 from .v007_screenshare_evidence import migrate as _create_screenshare_evidence
+from .v008_calendar_push_sync import migrate as _create_calendar_push_sync
 
 
 def _now() -> str:
@@ -26,6 +27,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (5, _create_task_extraction_cache),
     (6, _create_calendar_auto_join_requests),
     (7, _create_screenshare_evidence),
+    (8, _create_calendar_push_sync),
 )
 
 

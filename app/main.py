@@ -26,7 +26,10 @@ from fastapi import (
 from fastapi.responses import JSONResponse, Response
 
 from app import db
-from app.calendar_scheduler import run_calendar_auto_join
+from app.calendar_scheduler import (
+    accept_calendar_notification,
+    run_calendar_auto_join,
+)
 from app.config import settings
 from app.integrations.attendee import verify_attendee_signature
 from app.integrations.transcript import normalize_segments
@@ -43,8 +46,10 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     db.delete_expired_screen_frames()
     calendar_task: asyncio.Task[None] | None = None
     if settings.google_calendar_auto_join_enabled:
+        calendar_sync_wakeup = asyncio.Event()
         calendar_task = asyncio.create_task(
-            run_calendar_auto_join(attendee), name="google-calendar-auto-join"
+            run_calendar_auto_join(attendee, calendar_sync_wakeup),
+            name="google-calendar-auto-join",
         )
     try:
         yield
@@ -92,10 +97,33 @@ async def health() -> JSONResponse:
     )
 
 
+@app.post("/webhooks/google-calendar")
+async def google_calendar_webhook(request: Request) -> Response:
+    if not request.headers.get("X-Goog-Resource-State"):
+        raise HTTPException(status_code=400, detail="Missing Calendar resource state")
+    if not accept_calendar_notification(
+        request.headers.get("X-Goog-Channel-ID"),
+        request.headers.get("X-Goog-Channel-Token"),
+        request.headers.get("X-Goog-Resource-ID"),
+    ):
+        raise HTTPException(status_code=401, detail="Invalid Calendar notification")
+    return Response(status_code=204)
+
+
 @app.get("/calendar/auto-join", dependencies=[Depends(require_app_auth)])
 async def calendar_auto_join_status(limit: int = 20) -> dict[str, Any]:
+    watch = db.get_current_calendar_watch(settings.google_calendar_id)
+    push_is_active = watch is not None and int(watch["expiration_ms"]) > int(
+        datetime.now(UTC).timestamp() * 1000
+    )
+    mode = (
+        "disabled"
+        if not settings.google_calendar_auto_join_enabled
+        else ("push" if push_is_active else "polling")
+    )
     return {
         "enabled": settings.google_calendar_auto_join_enabled,
+        "mode": mode,
         "event_title": settings.google_calendar_event_title or None,
         "start_time": settings.google_calendar_start_time,
         "time_zone": settings.google_calendar_timezone,
@@ -110,17 +138,35 @@ async def start_meeting(body: MeetingStartRequest) -> dict[str, Any]:
         raise HTTPException(
             status_code=400, detail="Only Google Meet URLs are supported"
         )
+    screen_share_capture = (
+        settings.screenshare_capture_enabled
+        if body.screen_share_capture is None
+        else body.screen_share_capture
+    )
+    if screen_share_capture and not settings.screenshare_capture_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Screen-share capture is disabled by service configuration",
+        )
     try:
-        bot = await attendee.create_bot(str(body.meeting_url))
+        bot = await attendee.create_bot(
+            str(body.meeting_url), screen_share_capture=screen_share_capture
+        )
     except Exception as exc:
         logger.exception("Could not create Attendee bot")
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     bot_id = str(bot["id"])
-    db.create_meeting(bot_id, str(body.meeting_url), bot.get("state"))
+    db.create_meeting(
+        bot_id,
+        str(body.meeting_url),
+        bot.get("state"),
+        screenshare_capture_enabled=screen_share_capture,
+    )
     return {
         "bot_id": bot_id,
         "state": bot.get("state"),
         "meeting_url": body.meeting_url,
+        "screenshare_capture_enabled": screen_share_capture,
     }
 
 
@@ -268,7 +314,7 @@ async def attendee_video_websocket(websocket: WebSocket) -> None:
                 continue
 
             bot_id = str(payload.get("bot_id") or "")
-            if not bot_id or not db.meeting_exists(bot_id):
+            if not bot_id or not db.is_screenshare_capture_enabled(bot_id):
                 continue
             encoded_frame = event_data.get("frame")
             if (
@@ -279,7 +325,9 @@ async def attendee_video_websocket(websocket: WebSocket) -> None:
                 continue
             try:
                 frame_data = base64.b64decode(encoded_frame, validate=True)
-            except (ValueError, binascii.Error):
+            except binascii.Error:
+                continue
+            except ValueError:
                 continue
             if (
                 len(frame_data) > max_frame_bytes

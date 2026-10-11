@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -79,6 +79,97 @@ class GoogleCalendarClient:
                 break
             params["pageToken"] = page_token
         return events
+
+    async def sync_events(
+        self, sync_token: str | None
+    ) -> tuple[list[dict[str, Any]], str]:
+        access_token = await self._get_access_token()
+        url = (
+            "https://www.googleapis.com/calendar/v3/calendars/"
+            f"{quote(settings.google_calendar_id, safe='')}/events"
+        )
+        params: dict[str, str | int] = {
+            "singleEvents": "true",
+            "showDeleted": "true",
+            "maxResults": 2500,
+        }
+        if sync_token:
+            params["syncToken"] = sync_token
+        else:
+            params["timeMin"] = (
+                datetime.now(UTC)
+                - timedelta(minutes=settings.google_calendar_join_grace_minutes + 1)
+            ).isoformat()
+
+        events: list[dict[str, Any]] = []
+        page_token: str | None = None
+        next_sync_token: str | None = None
+        while True:
+            request_params = dict(params)
+            if page_token:
+                request_params["pageToken"] = page_token
+            response = await self.client.get(
+                url,
+                params=request_params,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            items = payload.get("items", [])
+            if not isinstance(items, list) or not all(
+                isinstance(item, dict) for item in items
+            ):
+                raise RuntimeError("Google Calendar returned an invalid events list")
+            events.extend(items)
+            page_token_value = payload.get("nextPageToken")
+            if isinstance(page_token_value, str) and page_token_value:
+                page_token = page_token_value
+                continue
+            token_value = payload.get("nextSyncToken")
+            if not isinstance(token_value, str) or not token_value:
+                raise RuntimeError("Google Calendar sync response had no nextSyncToken")
+            next_sync_token = token_value
+            break
+        return events, next_sync_token
+
+    async def watch_events(
+        self,
+        channel_id: str,
+        callback_url: str,
+        channel_token: str,
+        expiration_ms: int,
+    ) -> dict[str, Any]:
+        access_token = await self._get_access_token()
+        url = (
+            "https://www.googleapis.com/calendar/v3/calendars/"
+            f"{quote(settings.google_calendar_id, safe='')}/events/watch"
+        )
+        response = await self.client.post(
+            url,
+            json={
+                "id": channel_id,
+                "type": "web_hook",
+                "address": callback_url,
+                "token": channel_token,
+                "expiration": expiration_ms,
+            },
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict):
+            raise RuntimeError("Google Calendar returned an invalid watch response")
+        return result
+
+    async def stop_watching(self, channel_id: str, resource_id: str) -> None:
+        access_token = await self._get_access_token()
+        response = await self.client.post(
+            "https://www.googleapis.com/calendar/v3/channels/stop",
+            json={"id": channel_id, "resourceId": resource_id},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if response.status_code != 404:
+            response.raise_for_status()
 
     async def close(self) -> None:
         if self._owns_client:

@@ -2,18 +2,72 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import logging
+import secrets
+import time as monotonic_time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
+
+import httpx
 
 from app import db
 from app.config import settings
 from app.integrations.google_calendar import GoogleCalendarClient
 
 logger = logging.getLogger("jira-bot.calendar")
+_SYNC_WAKEUP: asyncio.Event | None = None
+
+
+def set_calendar_sync_wakeup(event: asyncio.Event | None) -> None:
+    global _SYNC_WAKEUP
+    _SYNC_WAKEUP = event
+
+
+def accept_calendar_notification(
+    channel_id: str | None, channel_token: str | None, resource_id: str | None
+) -> bool:
+    if not channel_id or not channel_token or not resource_id:
+        return False
+    channel = db.get_calendar_watch_channel(channel_id)
+    if channel is None:
+        return False
+    if channel["calendar_id"] != settings.google_calendar_id:
+        return False
+    if channel["status"] not in {"pending", "active"}:
+        return False
+    if not hmac.compare_digest(str(channel["channel_token"]), channel_token):
+        return False
+    expected_resource_id = channel.get("resource_id")
+    if expected_resource_id and not hmac.compare_digest(
+        str(expected_resource_id), resource_id
+    ):
+        return False
+    if _SYNC_WAKEUP is not None:
+        _SYNC_WAKEUP.set()
+    return True
+
+
+class CalendarWatchClient(Protocol):
+    async def watch_events(
+        self,
+        channel_id: str,
+        callback_url: str,
+        channel_token: str,
+        expiration_ms: int,
+    ) -> dict[str, Any]: ...
+
+    async def stop_watching(self, channel_id: str, resource_id: str) -> None: ...
+
+
+class CalendarSyncClient(Protocol):
+    async def sync_events(
+        self, sync_token: str | None
+    ) -> tuple[list[dict[str, Any]], str]: ...
 
 
 @dataclass(frozen=True)
@@ -40,7 +94,7 @@ def _parse_event_start(event: dict[str, Any]) -> datetime | None:
                 )
             )
         return parsed
-    except (ValueError, KeyError):
+    except ValueError, KeyError:
         return None
 
 
@@ -73,7 +127,7 @@ def _meet_url(event: dict[str, Any]) -> str | None:
     return None
 
 
-def _event_key(event: dict[str, Any], start: datetime) -> tuple[str, str] | None:
+def _event_key(event: dict[str, Any], start: datetime | None) -> tuple[str, str] | None:
     event_id = event.get("id")
     if not isinstance(event_id, str) or not event_id:
         return None
@@ -85,20 +139,21 @@ def _event_key(event: dict[str, Any], start: datetime) -> tuple[str, str] | None
         else None
     )
     if isinstance(recurring_event_id, str):
+        if original_value is not None:
+            occurrence_start = str(original_value)
+        elif start is not None:
+            occurrence_start = start.isoformat()
+        else:
+            return None
         series_id = recurring_event_id
-        occurrence_start = str(original_value or start.isoformat())
     else:
         series_id = event_id
         occurrence_start = "single-event"
-    key_material = "\n".join(
-        (settings.google_calendar_id, series_id, occurrence_start)
-    )
+    key_material = "\n".join((settings.google_calendar_id, series_id, occurrence_start))
     return hashlib.sha256(key_material.encode("utf-8")).hexdigest(), event_id
 
 
-def scheduled_meet(
-    event: dict[str, Any], now: datetime | None = None
-) -> ScheduledMeet | None:
+def calendar_meet(event: dict[str, Any]) -> ScheduledMeet | None:
     if event.get("status") == "cancelled":
         return None
     title = event.get("summary")
@@ -118,37 +173,49 @@ def scheduled_meet(
 
     start = _parse_event_start(event)
     meeting_url = _meet_url(event)
-    key_and_id = _event_key(event, start) if start is not None else None
+    key_and_id = _event_key(event, start)
     if start is None or meeting_url is None or key_and_id is None:
         return None
 
-    current = now or datetime.now(UTC)
     local_start = start.astimezone(ZoneInfo(settings.google_calendar_timezone))
     target_time = time.fromisoformat(settings.google_calendar_start_time)
     if (local_start.hour, local_start.minute) != (target_time.hour, target_time.minute):
         return None
-    if start < current - timedelta(minutes=settings.google_calendar_join_grace_minutes):
-        return None
-    if start > current + timedelta(minutes=settings.google_calendar_join_lead_minutes):
+    if start < datetime.now(UTC) - timedelta(
+        minutes=settings.google_calendar_join_grace_minutes
+    ):
         return None
 
     event_key, event_id = key_and_id
     return ScheduledMeet(
         event_key=event_key,
         event_id=event_id,
-        event_start=start.isoformat(),
+        event_start=start.astimezone(UTC).isoformat(),
         meeting_url=meeting_url,
     )
 
 
-async def request_due_meetings(
-    events: list[dict[str, Any]], attendee_client: Any, now: datetime | None = None
+def _is_due(candidate: ScheduledMeet, now: datetime) -> bool:
+    start = datetime.fromisoformat(candidate.event_start)
+    return start >= now - timedelta(
+        minutes=settings.google_calendar_join_grace_minutes
+    ) and start <= now + timedelta(minutes=settings.google_calendar_join_lead_minutes)
+
+
+def scheduled_meet(
+    event: dict[str, Any], now: datetime | None = None
+) -> ScheduledMeet | None:
+    candidate = calendar_meet(event)
+    if candidate is None or not _is_due(candidate, now or datetime.now(UTC)):
+        return None
+    return candidate
+
+
+async def _request_candidates(
+    candidates: list[ScheduledMeet], attendee_client: Any
 ) -> int:
     requested = 0
-    for event in events:
-        candidate = scheduled_meet(event, now)
-        if candidate is None:
-            continue
+    for candidate in candidates:
         if not db.claim_calendar_auto_join(
             candidate.event_key, candidate.event_id, candidate.event_start
         ):
@@ -159,7 +226,10 @@ async def request_due_meetings(
             bot = await attendee_client.create_bot(candidate.meeting_url)
             bot_id = str(bot["id"])
             db.create_meeting(
-                bot_id, candidate.meeting_url, bot.get("state")
+                bot_id,
+                candidate.meeting_url,
+                bot.get("state"),
+                screenshare_capture_enabled=settings.screenshare_capture_enabled,
             )
             db.finish_calendar_auto_join(
                 candidate.event_key, "requested", bot_id=bot_id
@@ -183,10 +253,164 @@ async def request_due_meetings(
     return requested
 
 
-async def run_calendar_auto_join(attendee_client: Any) -> None:
+async def request_due_meetings(
+    events: list[dict[str, Any]], attendee_client: Any, now: datetime | None = None
+) -> int:
+    current = now or datetime.now(UTC)
+    candidates = [
+        candidate
+        for event in events
+        if (candidate := scheduled_meet(event, current)) is not None
+    ]
+    return await _request_candidates(candidates, attendee_client)
+
+
+async def request_stored_due_meetings(
+    attendee_client: Any, now: datetime | None = None
+) -> int:
+    current = now or datetime.now(UTC)
+    time_min = (
+        current - timedelta(minutes=settings.google_calendar_join_grace_minutes)
+    ).isoformat()
+    time_max = (
+        current + timedelta(minutes=settings.google_calendar_join_lead_minutes)
+    ).isoformat()
+    rows = db.list_due_calendar_events(settings.google_calendar_id, time_min, time_max)
+    candidates = [
+        ScheduledMeet(
+            event_key=str(row["event_key"]),
+            event_id=str(row["calendar_event_id"]),
+            event_start=str(row["event_start"]),
+            meeting_url=str(row["meeting_url"]),
+        )
+        for row in rows
+    ]
+    return await _request_candidates(candidates, attendee_client)
+
+
+def _calendar_callback_url() -> str | None:
+    parsed = urlsplit(settings.app_public_url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    return f"{settings.app_public_url.rstrip('/')}/webhooks/google-calendar"
+
+
+async def _ensure_calendar_watch(calendar: CalendarWatchClient) -> bool:
+    callback_url = _calendar_callback_url()
+    if callback_url is None:
+        return False
+
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    current = db.get_current_calendar_watch(settings.google_calendar_id)
+    if (
+        current is not None
+        and int(current["expiration_ms"]) > now_ms + 24 * 60 * 60 * 1000
+    ):
+        return True
+
+    channel_id = uuid.uuid4().hex
+    channel_token = secrets.token_urlsafe(32)
+    requested_expiration = int(
+        (datetime.now(UTC) + timedelta(days=6)).timestamp() * 1000
+    )
+    db.create_calendar_watch_channel(
+        channel_id,
+        settings.google_calendar_id,
+        channel_token,
+        requested_expiration,
+    )
+    try:
+        result = await calendar.watch_events(
+            channel_id, callback_url, channel_token, requested_expiration
+        )
+    except Exception:
+        db.delete_calendar_watch_channel(channel_id)
+        if current is not None and int(current["expiration_ms"]) > now_ms:
+            logger.exception(
+                "Could not renew Google Calendar watch; keeping old channel"
+            )
+            return True
+        logger.exception("Could not create Google Calendar watch channel")
+        return False
+
+    resource_id = result.get("resourceId")
+    expiration = result.get("expiration", requested_expiration)
+    if not isinstance(resource_id, str) or not resource_id:
+        db.delete_calendar_watch_channel(channel_id)
+        logger.error("Google Calendar watch response omitted resourceId")
+        return current is not None and int(current["expiration_ms"]) > now_ms
+    try:
+        expiration_ms = int(expiration)
+    except TypeError, ValueError:
+        expiration_ms = requested_expiration
+    db.activate_calendar_watch_channel(channel_id, resource_id, expiration_ms)
+
+    if current is not None:
+        try:
+            if current.get("resource_id"):
+                await calendar.stop_watching(
+                    str(current["channel_id"]), str(current["resource_id"])
+                )
+            db.delete_calendar_watch_channel(str(current["channel_id"]))
+        except Exception:
+            logger.warning(
+                "Old Google Calendar watch could not be stopped", exc_info=True
+            )
+    logger.info("Google Calendar push channel active until %s", expiration_ms)
+    return True
+
+
+def _calendar_sync_change(
+    event: dict[str, Any], *, full_sync: bool
+) -> dict[str, Any] | None:
+    identity = _event_key(event, _parse_event_start(event))
+    if identity is None:
+        return None
+    event_key, event_id = identity
+    candidate = calendar_meet(event)
+    if candidate is not None:
+        return {
+            "action": "upsert",
+            "event_key": event_key,
+            "calendar_event_id": event_id,
+            "event_start": candidate.event_start,
+            "meeting_url": candidate.meeting_url,
+        }
+    if full_sync:
+        return None
+    return {"action": "delete", "event_key": event_key}
+
+
+async def sync_calendar_events(calendar: CalendarSyncClient) -> int:
+    calendar_id = settings.google_calendar_id
+    sync_token = db.get_calendar_sync_token(calendar_id)
+    full_sync = sync_token is None
+    try:
+        events, next_sync_token = await calendar.sync_events(sync_token)
+    except httpx.HTTPStatusError as exc:
+        if sync_token is None or exc.response.status_code != 410:
+            raise
+        db.clear_calendar_sync_token(calendar_id)
+        full_sync = True
+        events, next_sync_token = await calendar.sync_events(None)
+
+    changes = [
+        change
+        for event in events
+        if (change := _calendar_sync_change(event, full_sync=full_sync)) is not None
+    ]
+    db.apply_calendar_sync(calendar_id, changes, next_sync_token, replace_all=full_sync)
+    logger.info("Synced %s Google Calendar changes", len(changes))
+    return len(changes)
+
+
+async def run_calendar_auto_join(
+    attendee_client: Any, sync_wakeup: asyncio.Event
+) -> None:
     if not settings.google_calendar_auto_join_enabled:
         return
 
+    set_calendar_sync_wakeup(sync_wakeup)
     calendar = GoogleCalendarClient()
     try:
         logger.info(
@@ -195,22 +419,63 @@ async def run_calendar_auto_join(attendee_client: Any) -> None:
             settings.google_calendar_start_time,
             settings.google_calendar_timezone,
         )
+        push_mode = await _ensure_calendar_watch(calendar)
+        next_watch_check = monotonic_time.monotonic() + 3600
+        next_sync = monotonic_time.monotonic()
+        if push_mode:
+            sync_wakeup.clear()
+            try:
+                await sync_calendar_events(calendar)
+                next_sync = monotonic_time.monotonic() + 6 * 60 * 60
+            except Exception:
+                logger.exception("Initial Google Calendar sync failed")
+                next_sync = monotonic_time.monotonic() + 60
+
         while True:
             db.mark_stale_calendar_auto_joins_uncertain()
             now = datetime.now(UTC)
-            time_min = now - timedelta(
-                minutes=settings.google_calendar_join_grace_minutes
-            )
-            time_max = now + timedelta(
-                minutes=settings.google_calendar_join_lead_minutes
-            )
             try:
-                events = await calendar.list_events(time_min, time_max)
-                await request_due_meetings(events, attendee_client, now)
+                monotonic_now = monotonic_time.monotonic()
+                if push_mode:
+                    await request_stored_due_meetings(attendee_client, now)
+                    if sync_wakeup.is_set() or monotonic_now >= next_sync:
+                        sync_wakeup.clear()
+                        try:
+                            await sync_calendar_events(calendar)
+                            next_sync = monotonic_time.monotonic() + 6 * 60 * 60
+                        except Exception:
+                            logger.exception("Google Calendar incremental sync failed")
+                            next_sync = monotonic_time.monotonic() + 60
+                    if monotonic_now >= next_watch_check:
+                        push_mode = await _ensure_calendar_watch(calendar)
+                        next_watch_check = monotonic_time.monotonic() + 3600
+                else:
+                    time_min = now - timedelta(
+                        minutes=settings.google_calendar_join_grace_minutes
+                    )
+                    time_max = now + timedelta(
+                        minutes=settings.google_calendar_join_lead_minutes
+                    )
+                    events = await calendar.list_events(time_min, time_max)
+                    await request_due_meetings(events, attendee_client, now)
+                    if monotonic_now >= next_watch_check:
+                        push_mode = await _ensure_calendar_watch(calendar)
+                        next_watch_check = monotonic_time.monotonic() + 3600
+                        if push_mode:
+                            sync_wakeup.clear()
+                            try:
+                                await sync_calendar_events(calendar)
+                                next_sync = monotonic_time.monotonic() + 6 * 60 * 60
+                            except Exception:
+                                logger.exception("Initial Google Calendar sync failed")
+                                next_sync = monotonic_time.monotonic() + 60
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Google Calendar auto-join poll failed")
-            await asyncio.sleep(settings.google_calendar_poll_seconds)
+                logger.exception("Google Calendar auto-join processing failed")
+            await asyncio.sleep(
+                10 if push_mode else settings.google_calendar_poll_seconds
+            )
     finally:
+        set_calendar_sync_wakeup(None)
         await calendar.close()
