@@ -3,11 +3,11 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import shutil
 import tempfile
 import threading
-import wave
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import mlx_whisper
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -52,35 +52,28 @@ def _format_utterances(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
 @app.post("/transcribe", response_model=None)
 def transcribe(
     audio: Annotated[UploadFile, File()],
-    sample_rate: Annotated[int, Form()],
     language: Annotated[str | None, Form()] = None,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any] | JSONResponse:
-    expected_token = os.getenv("MLX_TRANSCRIBER_API_KEY", "")
-    if not expected_token:
-        raise HTTPException(status_code=503, detail="Transcriber token is not configured")
-    expected_authorization = f"Bearer {expected_token}"
-    if not authorization or not hmac.compare_digest(
-        authorization, expected_authorization
-    ):
-        raise HTTPException(status_code=401, detail="Invalid transcriber token")
-    if not 8_000 <= sample_rate <= 48_000:
-        raise HTTPException(status_code=422, detail="Unsupported PCM sample rate")
-
-    model = os.getenv("MLX_WHISPER_MODEL", "mlx-community/whisper-turbo")
     try:
+        expected_token = os.getenv("MLX_TRANSCRIBER_API_KEY", "")
+        if not expected_token:
+            raise HTTPException(
+                status_code=503, detail="Transcriber token is not configured"
+            )
+        expected_authorization = f"Bearer {expected_token}"
+        if not authorization or not hmac.compare_digest(
+            authorization, expected_authorization
+        ):
+            raise HTTPException(status_code=401, detail="Invalid transcriber token")
+
+        model = os.getenv("MLX_WHISPER_MODEL", "mlx-community/whisper-turbo")
         with tempfile.TemporaryDirectory(prefix="mlx-whisper-") as temp_dir:
-            audio_path = Path(temp_dir) / "audio.wav"
-            total_bytes = 0
-            with wave.open(str(audio_path), "wb") as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(sample_rate)
-                while chunk := audio.file.read(1024 * 1024):
-                    total_bytes += len(chunk)
-                    wav_file.writeframesraw(chunk)
-            if total_bytes == 0 or total_bytes % 2:
-                raise HTTPException(status_code=422, detail="Invalid 16-bit PCM audio")
+            audio_path = Path(temp_dir) / "audio.mp3"
+            with audio_path.open("wb") as output_file:
+                shutil.copyfileobj(audio.file, output_file)
+            if audio_path.stat().st_size == 0:
+                raise HTTPException(status_code=422, detail="Audio upload is empty")
 
             with _transcription_lock:
                 result = mlx_whisper.transcribe(
@@ -101,7 +94,8 @@ def transcribe(
     finally:
         audio.file.close()
 
-    segments = result.get("segments", [])
+    # mlx-whisper does not annotate its return value; transcribe() returns segment dictionaries.
+    segments = cast(list[dict[str, Any]], result.get("segments", []))
     return {
         "status": "done",
         "result": {
