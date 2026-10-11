@@ -6,8 +6,8 @@ This service joins a Google Meet with a locally hosted Attendee bot. Attendee se
 
 1. `POST /meetings` creates an Attendee bot and configures `bot.state_change` and `transcript.update` callbacks. Optional Google Calendar auto-join uses push notifications plus incremental sync when a public HTTPS callback is configured, and falls back to polling in the local Compose setup.
 2. Attendee sends MP3 audio segments to the local MLX Whisper service through its `custom_async_v2` provider and emits signed transcript webhooks. Webhooks are verified and deduplicated; utterances are persisted as they arrive. If `SCREENSHARE_CAPTURE_ENABLED=true`, Attendee also streams screen-share-only JPEG frames to an authenticated websocket. The API samples and stores frames with estimated meeting-relative timestamps.
-3. On `post_processing_completed`, the API atomically records the signed webhook and a finalization job in SQLite. A separate worker fetches the canonical locally generated transcript from Attendee and extracts task proposals in chunks. For each proposal, Gemma reviews a bounded transcript window and keyword matches; nearby screen-share frames can add visual context, but cannot create a task or set its owner. Duplicate webhook deliveries are ignored.
-4. High-confidence tasks with a verified spoken task quote are saved alongside assignment evidence, transcript excerpts, and time-linked visual evidence. Jira receives visual summaries; JPEG attachments are a separate opt-in via `JIRA_ATTACH_SCREENSHARE_EVIDENCE`. Jira issue creation is attempted only when dry-run is disabled and Jira credentials are configured.
+3. On `post_processing_completed`, the API atomically records the signed webhook and a finalization job in SQLite. A separate worker fetches the canonical transcript and paginated Google Meet chat messages from Attendee. It extracts task proposals from transcript chunks only, then uses related transcript and chat excerpts to enrich each proposal. Nearby screen-share frames can add visual context, but chat and images cannot create tasks or set their owners. Duplicate webhook deliveries are ignored.
+4. High-confidence tasks with a verified spoken task quote are saved alongside assignment evidence, transcript/chat excerpts, and time-linked visual evidence. Jira receives visual summaries; JPEG attachments are a separate opt-in via `JIRA_ATTACH_SCREENSHARE_EVIDENCE`. Jira issue creation is attempted only when dry-run is disabled and Jira credentials are configured.
 
 Attendee owns the meeting-bot lifecycle and audio capture. This service's API is the Jira assistant's workflow API: it delegates bot operations to Attendee, receives callbacks, and coordinates task extraction and Jira issue creation.
 
@@ -34,9 +34,9 @@ sequenceDiagram
     end
     API->>Queue: Persist webhook and finalization job atomically
     Worker->>Queue: Claim job and renew lease
-    Worker->>Attendee: Fetch final transcript
+    Worker->>Attendee: Fetch final transcript and paginated chat messages
     Worker->>Gemma: Extract task proposals from transcript chunks
-    Worker->>Gemma: Enrich proposals with related excerpts
+    Worker->>Gemma: Enrich proposals with transcript and chat excerpts
     opt Screen-share context available
       Worker->>Gemma: Summarize nearest frames for verified proposals
     end
@@ -46,7 +46,7 @@ sequenceDiagram
     Client->>API: Check status, leave, or reprocess
 ```
 
-The transcript, extracted-task records, cited context excerpts, sampled screen-share JPEGs, and durable job queue are stored in SQLite at `DATABASE_PATH`, shared by the API and worker. Screen frames expire after 24 hours by default; the worker removes expired rows periodically. The authenticated `GET /meetings/{bot_id}/screen-frames/{frame_id}` endpoint serves retained frames. On startup, both processes apply unapplied, versioned schema migrations in order. Jobs are leased; transient failures retry with capped exponential backoff, honoring `Retry-After`, until connectivity returns, and expired leases are reclaimed. Permanent failures are surfaced instead of retried. Ambiguous Jira create outcomes remain `uncertain` rather than being retried automatically, to avoid duplicate issues. This protects work across process and container restarts on the same host; it is not a substitute for off-host backups or a replicated production database. Transcript and optional image inputs are sent to the configured OpenAI-compatible model endpoint, which should remain local for sensitive meeting data. Jira receives accepted task fields, a context-rich description, separate task and assignment quotes, cited transcript excerpts, visual summaries, and the meeting link when issue creation is enabled. If screenshot attachments are enabled, Jira retains a separate copy under its own retention policies.
+The transcript, extracted-task records, cited context excerpts, sampled screen-share JPEGs, and durable job queue are stored in SQLite at `DATABASE_PATH`, shared by the API and worker. Screen frames expire after 24 hours by default; the worker removes expired rows periodically. The authenticated `GET /meetings/{bot_id}/screen-frames/{frame_id}` endpoint serves retained frames. On startup, both processes apply unapplied, versioned schema migrations in order. Jobs are leased; transient failures retry with capped exponential backoff, honoring `Retry-After`, until connectivity returns, and expired leases are reclaimed. Permanent failures are surfaced instead of retried. Ambiguous Jira create outcomes remain `uncertain` rather than being retried automatically, to avoid duplicate issues. This protects work across process and container restarts on the same host; it is not a substitute for off-host backups or a replicated production database. Transcript and meeting chat messages, plus optional image inputs, are sent to the configured OpenAI-compatible model endpoint, which should remain local for sensitive meeting data. Jira receives accepted task fields, a context-rich description, separate task and assignment quotes, cited transcript excerpts, visual summaries, and the meeting link when issue creation is enabled. If screenshot attachments are enabled, Jira retains a separate copy under its own retention policies.
 
 ### Operating on unstable networks
 

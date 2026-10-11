@@ -77,8 +77,10 @@ class PipelineNetworkResilienceTests(unittest.IsolatedAsyncioTestCase):
         )
         create_issue = AsyncMock(side_effect=[connect_error, "TEST-1"])
         get_transcript = AsyncMock(return_value=self.transcript)
+        get_chat_messages = AsyncMock(return_value=[])
         with (
             patch("app.pipeline.attendee.get_transcript", new=get_transcript),
+            patch("app.pipeline.attendee.get_chat_messages", new=get_chat_messages),
             patch(
                 "app.pipeline.extract_tasks", new=AsyncMock(return_value=self.proposals)
             ),
@@ -103,8 +105,10 @@ class PipelineNetworkResilienceTests(unittest.IsolatedAsyncioTestCase):
         )
         create_issue = AsyncMock(side_effect=read_timeout)
         get_transcript = AsyncMock(return_value=self.transcript)
+        get_chat_messages = AsyncMock(return_value=[])
         with (
             patch("app.pipeline.attendee.get_transcript", new=get_transcript),
+            patch("app.pipeline.attendee.get_chat_messages", new=get_chat_messages),
             patch(
                 "app.pipeline.extract_tasks", new=AsyncMock(return_value=self.proposals)
             ),
@@ -118,6 +122,36 @@ class PipelineNetworkResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(create_issue.await_count, 1)
         self.assertEqual(get_transcript.await_count, 1)
         self.assertEqual(self._stored_task()["status"], "uncertain")
+
+    async def test_chat_messages_are_forwarded_for_context_enrichment(self) -> None:
+        chat_messages = [
+            {
+                "id": "chat-1",
+                "timestamp_ms": 1100,
+                "speaker_name": "Leo",
+                "text": "Cover HTTP 429 with Retry-After.",
+                "source": "chat",
+            }
+        ]
+        get_transcript = AsyncMock(return_value=self.transcript)
+        get_chat_messages = AsyncMock(return_value=chat_messages)
+        extract = AsyncMock(return_value=self.proposals)
+        create_issue = AsyncMock(return_value="TEST-2")
+        with (
+            patch("app.pipeline.attendee.get_transcript", new=get_transcript),
+            patch("app.pipeline.attendee.get_chat_messages", new=get_chat_messages),
+            patch("app.pipeline.extract_tasks", new=extract),
+            patch("app.pipeline.jira.create_issue", new=create_issue),
+        ):
+            await finalize_meeting("bot-network")
+
+        extract.assert_awaited_once()
+        call = extract.await_args
+        assert call is not None
+        self.assertEqual(call.args[0][0]["text"], self.transcript[0]["text"])
+        self.assertEqual(call.kwargs["bot_id"], "bot-network")
+        self.assertEqual(call.kwargs["chat_messages"], chat_messages)
+        self.assertEqual(self._stored_task()["status"], "created")
 
 
 if __name__ == "__main__":

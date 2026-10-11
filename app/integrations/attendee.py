@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import json
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -113,6 +113,69 @@ class AttendeeClient:
         )
         response.raise_for_status()
         return response.json()
+
+    async def get_chat_messages(self, bot_id: str) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            params = {"cursor": cursor} if cursor else None
+            response = await self.client.get(
+                f"bots/{bot_id}/chat_messages", params=params
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, list):
+                items = payload
+                next_url = None
+            elif isinstance(payload, dict):
+                items = payload.get("results", [])
+                next_url = payload.get("next")
+            else:
+                raise ValueError("Attendee returned an invalid chat message response")
+            if not isinstance(items, list):
+                raise ValueError("Attendee returned an invalid chat message list")
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                timestamp_ms = item.get("timestamp_ms")
+                if (
+                    not isinstance(timestamp_ms, int)
+                    or isinstance(timestamp_ms, bool)
+                    or timestamp_ms < 0
+                ):
+                    timestamp = item.get("timestamp")
+                    timestamp_ms = (
+                        timestamp * 1000
+                        if isinstance(timestamp, int)
+                        and not isinstance(timestamp, bool)
+                        and timestamp >= 0
+                        else None
+                    )
+                messages.append(
+                    {
+                        "id": item.get("id"),
+                        "timestamp_ms": timestamp_ms,
+                        "speaker_name": str(
+                            item.get("sender_name") or "Unknown speaker"
+                        ),
+                        "text": text.strip(),
+                        "source": "chat",
+                    }
+                )
+
+            if not isinstance(next_url, str) or not next_url:
+                break
+            next_cursor = parse_qs(urlsplit(next_url).query).get("cursor", [None])[0]
+            if not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        return messages
 
     async def close(self) -> None:
         await self.client.aclose()

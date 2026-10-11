@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -14,6 +15,7 @@ class TaskContextEvidence(BaseModel):
     quote: str = Field(min_length=1)
     timestamp_ms: int | None = Field(default=None, ge=0)
     speaker_name: str | None = None
+    source: Literal["transcript", "chat"] = "transcript"
 
 
 class TaskVisualEvidence(BaseModel):

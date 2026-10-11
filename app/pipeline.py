@@ -28,7 +28,18 @@ async def finalize_meeting(bot_id: str) -> None:
             raise RuntimeError("Attendee returned an empty transcript")
         db.save_final_transcript(bot_id, segments)
         meeting = db.get_meeting(bot_id) or meeting
-        proposals = await extract_tasks(segments, bot_id=bot_id)
+        try:
+            chat_messages = await attendee.get_chat_messages(bot_id)
+        except Exception:
+            logger.warning(
+                "Could not fetch meeting chat messages for bot %s",
+                bot_id,
+                exc_info=True,
+            )
+            chat_messages = []
+        proposals = await extract_tasks(
+            segments, bot_id=bot_id, chat_messages=chat_messages
+        )
         transcript_text = "\n".join(segment["text"] for segment in segments).casefold()
         eligible = []
         for proposal in proposals.tasks:

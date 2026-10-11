@@ -94,7 +94,8 @@ class JiraClient:
                     _heading("Related meeting excerpts"),
                     *[
                         _paragraph(
-                            f"{_timestamp_label(evidence.get('timestamp_ms'))} — "
+                            f"{'Chat message' if evidence.get('source') == 'chat' else 'Transcript'} "
+                            f"({_timestamp_label(evidence.get('timestamp_ms'))}) — "
                             f"{evidence.get('speaker_name') or 'Unknown speaker'}: "
                             f'"{evidence.get("quote", "")}"'
                         )
