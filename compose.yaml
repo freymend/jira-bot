@@ -69,6 +69,8 @@ services:
       DATABASE_PATH: /app/data/jira_bot.sqlite3
       ATTENDEE_API_BASE: http://attendee-app-local:8000/api/v1
       LLM_BASE_URL: ${LLM_BASE_URL_DOCKER:-http://host.docker.internal:8100/v1}
+      LLM_CONTEXT_TOKENS: ${LLM_CONTEXT_TOKENS:-16384}
+      LLM_MAX_COMPLETION_TOKENS: ${LLM_MAX_COMPLETION_TOKENS:-2048}
     depends_on:
       attendee-app-local:
         condition: service_started
@@ -102,6 +104,8 @@ services:
       DATABASE_PATH: /app/data/jira_bot.sqlite3
       ATTENDEE_API_BASE: http://attendee-app-local:8000/api/v1
       LLM_BASE_URL: ${LLM_BASE_URL_DOCKER:-http://host.docker.internal:8100/v1}
+      LLM_CONTEXT_TOKENS: ${LLM_CONTEXT_TOKENS:-16384}
+      LLM_MAX_COMPLETION_TOKENS: ${LLM_MAX_COMPLETION_TOKENS:-2048}
     depends_on:
       attendee-app-local:
         condition: service_started

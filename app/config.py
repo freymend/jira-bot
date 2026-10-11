@@ -14,8 +14,7 @@ def _json_mapping(name: str) -> dict[str, str]:
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"{name} must contain a JSON object") from exc
     if not isinstance(value, dict) or not all(
-        isinstance(key, str) and isinstance(item, str)
-        for key, item in value.items()
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
     ):
         raise RuntimeError(f"{name} must map strings to strings")
     return value
@@ -59,6 +58,19 @@ class Settings:
         threshold = float(os.getenv("LLM_CONFIDENCE_THRESHOLD", "0.85"))
         if not 0 <= threshold <= 1:
             raise RuntimeError("LLM_CONFIDENCE_THRESHOLD must be between 0 and 1")
+        llm_context_tokens = int(os.getenv("LLM_CONTEXT_TOKENS", "16384"))
+        llm_max_completion_tokens = int(os.getenv("LLM_MAX_COMPLETION_TOKENS", "2048"))
+        if llm_context_tokens < 8192:
+            raise RuntimeError("LLM_CONTEXT_TOKENS must be at least 8192")
+        minimum_prompt_room = 1024 + 256 + 4096 + 512
+        if not 256 <= llm_max_completion_tokens <= (
+            llm_context_tokens - minimum_prompt_room
+        ):
+            raise RuntimeError(
+                "LLM_MAX_COMPLETION_TOKENS must be at least 256 and leave "
+                "enough room for prompt content and safety margins"
+            )
+        calendar_auto_join_enabled = _bool("GOOGLE_CALENDAR_AUTO_JOIN_ENABLED", False)
         return cls(
             app_api_token=os.getenv("APP_API_TOKEN", ""),
             app_public_url=os.getenv("APP_PUBLIC_URL", "").rstrip("/"),
@@ -72,9 +84,13 @@ class Settings:
             attendee_bot_name=os.getenv("ATTENDEE_BOT_NAME", "Jira Meeting Assistant"),
             mlx_transcriber_api_key=os.getenv("MLX_TRANSCRIBER_API_KEY", ""),
             mlx_whisper_language=os.getenv("MLX_WHISPER_LANGUAGE", "").strip(),
-            llm_base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:8100/v1").rstrip("/"),
+            llm_base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:8100/v1").rstrip(
+                "/"
+            ),
             llm_api_key=os.getenv("LLM_API_KEY", "local"),
             llm_model=os.getenv("LLM_MODEL", "mlx-community/gemma-4-e4b-it-4bit"),
+            llm_context_tokens=llm_context_tokens,
+            llm_max_completion_tokens=llm_max_completion_tokens,
             llm_confidence_threshold=threshold,
             jira_dry_run=_bool("JIRA_DRY_RUN", True),
             jira_base_url=os.getenv("JIRA_BASE_URL", "").rstrip("/"),

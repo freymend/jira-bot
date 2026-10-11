@@ -209,6 +209,9 @@ def up() -> None:
     _require_setup()
     whisper_command = _whisper_command()
     model = _setting("LLM_MODEL", "mlx-community/gemma-4-e4b-it-4bit")
+    context_tokens = int(_setting("LLM_CONTEXT_TOKENS", "16384"))
+    if context_tokens < 8192:
+        raise RuntimeError("LLM_CONTEXT_TOKENS must be at least 8192")
     vllm = shutil.which("vllm")
     try:
         if vllm is not None:
@@ -222,7 +225,7 @@ def up() -> None:
                 "--port",
                 "8100",
                 "--max-model-len",
-                "16384",
+                str(context_tokens),
             ]
             _start_native_service(
                 "gemma", gemma_command, ROOT, "http://127.0.0.1:8100/health"
