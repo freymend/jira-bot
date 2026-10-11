@@ -20,6 +20,36 @@ class GoogleCalendarClient:
         self._access_token: str | None = None
         self._access_token_expires_at = 0.0
 
+    @staticmethod
+    def _raise_for_google_error(response: httpx.Response) -> None:
+        if not response.is_error:
+            return
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            message = error.get("message")
+            errors = error.get("errors")
+            reason = next(
+                (
+                    item.get("reason")
+                    for item in errors
+                    if isinstance(item, dict) and isinstance(item.get("reason"), str)
+                ),
+                None,
+            ) if isinstance(errors, list) else None
+            detail = f"Google Calendar returned HTTP {response.status_code}"
+            if isinstance(reason, str):
+                detail += f" ({reason})"
+            if isinstance(message, str):
+                detail += f": {message}"
+            raise httpx.HTTPStatusError(
+                detail, request=response.request, response=response
+            )
+        response.raise_for_status()
+
     async def _get_access_token(self) -> str:
         if self._access_token and time.monotonic() < self._access_token_expires_at - 60:
             return self._access_token
@@ -33,7 +63,7 @@ class GoogleCalendarClient:
                 "grant_type": "refresh_token",
             },
         )
-        response.raise_for_status()
+        self._raise_for_google_error(response)
         token_response = response.json()
         access_token = token_response.get("access_token")
         expires_in = token_response.get("expires_in")
@@ -66,7 +96,7 @@ class GoogleCalendarClient:
                 params=params,
                 headers={"Authorization": f"Bearer {access_token}"},
             )
-            response.raise_for_status()
+            self._raise_for_google_error(response)
             payload = response.json()
             items = payload.get("items", [])
             if not isinstance(items, list) or not all(
@@ -113,7 +143,7 @@ class GoogleCalendarClient:
                 params=request_params,
                 headers={"Authorization": f"Bearer {access_token}"},
             )
-            response.raise_for_status()
+            self._raise_for_google_error(response)
             payload = response.json()
             items = payload.get("items", [])
             if not isinstance(items, list) or not all(
@@ -155,7 +185,7 @@ class GoogleCalendarClient:
             },
             headers={"Authorization": f"Bearer {access_token}"},
         )
-        response.raise_for_status()
+        self._raise_for_google_error(response)
         result = response.json()
         if not isinstance(result, dict):
             raise RuntimeError("Google Calendar returned an invalid watch response")
@@ -169,7 +199,7 @@ class GoogleCalendarClient:
             headers={"Authorization": f"Bearer {access_token}"},
         )
         if response.status_code != 404:
-            response.raise_for_status()
+            self._raise_for_google_error(response)
 
     async def close(self) -> None:
         if self._owns_client:

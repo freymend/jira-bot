@@ -319,6 +319,40 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GoogleCalendarClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_forbidden_response_includes_google_api_reason(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "oauth2.googleapis.com":
+                return httpx.Response(
+                    200,
+                    json={"access_token": "secret-access-token", "expires_in": 3600},
+                    request=request,
+                )
+            return httpx.Response(
+                403,
+                json={
+                    "error": {
+                        "code": 403,
+                        "message": "Calendar API is not enabled",
+                        "errors": [{"reason": "accessNotConfigured"}],
+                    }
+                },
+                request=request,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        calendar = GoogleCalendarClient(client)
+        try:
+            with self.assertRaisesRegex(
+                httpx.HTTPStatusError, "accessNotConfigured"
+            ) as raised:
+                await calendar.list_events(
+                    datetime(2026, 10, 13, 16, 55, tzinfo=UTC),
+                    datetime(2026, 10, 13, 17, 5, tzinfo=UTC),
+                )
+        finally:
+            await client.aclose()
+        self.assertNotIn("secret-access-token", str(raised.exception))
+
     async def test_full_and_incremental_sync_use_persisted_token_shape(self) -> None:
         event_requests: list[httpx.Request] = []
 
