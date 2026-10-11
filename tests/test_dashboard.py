@@ -3,16 +3,23 @@ from __future__ import annotations
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import UTC, datetime, time as datetime_time, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from app import db
+from app.calendar_scheduler import (
+    request_due_meetings,
+    request_stored_due_meetings,
+)
 from app.config import settings
 from app.dashboard import server as dashboard
-from app.main import dashboard_overview
+from app.main import _dashboard_calendar_schedule, dashboard_overview
 
 
 class DashboardConfigTests(unittest.TestCase):
@@ -116,28 +123,128 @@ class DashboardConfigTests(unittest.TestCase):
         self.assertNotIn("LLM_CONTEXT_TOKENS", dashboard._env_values())
 
 
-class DashboardOverviewTests(unittest.IsolatedAsyncioTestCase):
-    async def test_overview_includes_scheduled_calendar_joins(self) -> None:
-        event = {
-            "calendar_event_id": "event-1",
-            "event_start": "2026-10-12T17:00:00+00:00",
-            "event_end": "2026-10-12T18:00:00+00:00",
-            "meeting_url": "https://meet.google.com/abc-defg-hij",
-        }
-        attempt = {
-            "calendar_event_id": "event-1",
-            "event_start": event["event_start"],
-            "status": "requested",
-            "bot_id": "bot-1",
-            "error": None,
-        }
-        configured = replace(
+class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
+    def _settings(self):
+        return replace(
             settings,
             google_calendar_auto_join_enabled=True,
             google_calendar_event_title="Daily Sync",
             google_calendar_timezone="America/Los_Angeles",
+            google_calendar_start_time="10:00",
+            google_calendar_organizer_email="",
             google_calendar_id="primary",
         )
+
+    async def test_polling_mode_reads_upcoming_events_from_calendar_api(self) -> None:
+        timezone = ZoneInfo("America/Los_Angeles")
+        now = datetime.now(UTC)
+        start_day = now.astimezone(timezone).date() + timedelta(days=2)
+        event_start = datetime.combine(start_day, datetime_time(10, 0), tzinfo=timezone)
+        event_end = event_start + timedelta(minutes=30)
+        raw_event = {
+            "id": "event-1",
+            "summary": "Daily Sync",
+            "start": {"dateTime": event_start.isoformat()},
+            "end": {"dateTime": event_end.isoformat()},
+            "hangoutLink": "https://meet.google.com/abc-defg-hij",
+        }
+        calendar_client = AsyncMock()
+        calendar_client.list_events = AsyncMock(return_value=[raw_event])
+        calendar_client.close = AsyncMock()
+        configured = self._settings()
+        attendee_client = SimpleNamespace(
+            create_bot=AsyncMock(return_value={"id": "bot-1"})
+        )
+
+        with (
+            patch("app.main.settings", configured),
+            patch("app.calendar_scheduler.settings", configured),
+            patch("app.main.db.get_current_calendar_watch", return_value=None),
+            patch("app.main.db.list_due_calendar_events", return_value=[]),
+            patch("app.main.db.list_calendar_auto_joins", return_value=[]),
+            patch("app.main.GoogleCalendarClient", return_value=calendar_client),
+            patch("app.main._DASHBOARD_CALENDAR_CACHE", None),
+            patch(
+                "app.calendar_scheduler.db.claim_calendar_auto_join", return_value=True
+            ),
+            patch("app.calendar_scheduler.db.create_meeting"),
+            patch("app.calendar_scheduler.db.finish_calendar_auto_join"),
+        ):
+            events, source, error = await _dashboard_calendar_schedule(now)
+            due_now = datetime.fromisoformat(events[0]["event_start"]) - timedelta(
+                minutes=configured.google_calendar_join_lead_minutes
+            )
+            requested = await request_due_meetings(
+                [raw_event], attendee_client, due_now
+            )
+
+        self.assertEqual(source, "calendar_api")
+        self.assertIsNone(error)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_id"], "event-1")
+        self.assertEqual(events[0]["join_status"], "scheduled")
+        self.assertEqual(requested, 1)
+        attendee_client.create_bot.assert_awaited_once_with(
+            "https://meet.google.com/abc-defg-hij"
+        )
+        calendar_client.list_events.assert_awaited_once_with(
+            now, now + timedelta(days=14)
+        )
+        calendar_client.close.assert_awaited_once()
+
+    async def test_push_mode_uses_synchronized_calendar_rows(self) -> None:
+        now = datetime.now(UTC)
+        row = {
+            "event_key": "event-key-push",
+            "calendar_event_id": "event-push",
+            "event_start": (now + timedelta(days=1)).isoformat(),
+            "event_end": (now + timedelta(days=1, minutes=30)).isoformat(),
+            "meeting_url": "https://meet.google.com/abc-defg-hij",
+        }
+        watch = {"expiration_ms": int((now + timedelta(days=1)).timestamp() * 1000)}
+        configured = self._settings()
+        attendee_client = SimpleNamespace(
+            create_bot=AsyncMock(return_value={"id": "bot-push"})
+        )
+        with (
+            patch("app.main.settings", configured),
+            patch("app.calendar_scheduler.settings", configured),
+            patch("app.main.db.get_current_calendar_watch", return_value=watch),
+            patch("app.main.db.list_due_calendar_events", return_value=[row]),
+            patch("app.main.db.list_calendar_auto_joins", return_value=[]),
+            patch("app.main.GoogleCalendarClient") as calendar_client,
+            patch(
+                "app.calendar_scheduler.db.claim_calendar_auto_join", return_value=True
+            ),
+            patch("app.calendar_scheduler.db.create_meeting"),
+            patch("app.calendar_scheduler.db.finish_calendar_auto_join"),
+        ):
+            events, source, error = await _dashboard_calendar_schedule(now)
+            event_start = datetime.fromisoformat(row["event_start"])
+            due_now = event_start - timedelta(
+                minutes=configured.google_calendar_join_lead_minutes
+            )
+            requested = await request_stored_due_meetings(attendee_client, due_now)
+
+        self.assertEqual(source, "push_sync")
+        self.assertIsNone(error)
+        self.assertEqual(events[0]["event_id"], "event-push")
+        self.assertEqual(requested, 1)
+        attendee_client.create_bot.assert_awaited_once_with(row["meeting_url"])
+        calendar_client.assert_not_called()
+
+    async def test_overview_includes_calendar_events_and_source(self) -> None:
+        event = {
+            "event_id": "event-1",
+            "event_title": "Daily Sync",
+            "event_start": "2026-10-13T17:00:00+00:00",
+            "event_end": "2026-10-13T17:30:00+00:00",
+            "meeting_url": "https://meet.google.com/abc-defg-hij",
+            "join_status": "requested",
+            "bot_id": "bot-1",
+            "error": None,
+        }
+        configured = self._settings()
         with (
             patch("app.main.settings", configured),
             patch(
@@ -145,13 +252,16 @@ class DashboardOverviewTests(unittest.IsolatedAsyncioTestCase):
                 return_value={"database": True, "worker": True},
             ),
             patch("app.main.db.list_recent_meetings", return_value=[]),
-            patch("app.main.db.list_due_calendar_events", return_value=[event]),
-            patch("app.main.db.list_calendar_auto_joins", return_value=[attempt]),
+            patch(
+                "app.main._dashboard_calendar_schedule",
+                new=AsyncMock(return_value=([event], "calendar_api", None)),
+            ),
             patch("app.main._probe_service", new=AsyncMock(return_value="healthy")),
         ):
             result = await dashboard_overview()
 
         self.assertEqual(result["calendar"]["event_title_filter"], "Daily Sync")
+        self.assertEqual(result["calendar"]["source"], "calendar_api")
         self.assertEqual(len(result["calendar"]["upcoming_events"]), 1)
         scheduled = result["calendar"]["upcoming_events"][0]
         self.assertEqual(scheduled["join_status"], "requested")

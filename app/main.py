@@ -292,9 +292,11 @@ async def dashboard_overview(limit: int = 25) -> dict[str, Any]:
         },
     ]
     now = datetime.now(UTC)
-    calendar_events, calendar_source, calendar_error = (
-        await _dashboard_calendar_schedule(now)
-    )
+    (
+        calendar_events,
+        calendar_source,
+        calendar_error,
+    ) = await _dashboard_calendar_schedule(now)
     calendar_service = services[-1]
     if settings.google_calendar_auto_join_enabled:
         calendar_service["status"] = "unavailable" if calendar_error else "healthy"
@@ -305,7 +307,9 @@ async def dashboard_overview(limit: int = 25) -> dict[str, Any]:
     services_healthy = all(
         service["status"] in critical_statuses for service in services[:6]
     )
-    calendar_healthy = not settings.google_calendar_auto_join_enabled or not calendar_error
+    calendar_healthy = (
+        not settings.google_calendar_auto_join_enabled or not calendar_error
+    )
     overall_status = "healthy" if services_healthy and calendar_healthy else "degraded"
     return {
         "status": overall_status,
@@ -315,6 +319,8 @@ async def dashboard_overview(limit: int = 25) -> dict[str, Any]:
         "calendar": {
             "enabled": settings.google_calendar_auto_join_enabled,
             "event_title_filter": settings.google_calendar_event_title or None,
+            "start_time_filter": settings.google_calendar_start_time,
+            "organizer_email_filter": settings.google_calendar_organizer_email or None,
             "time_zone": settings.google_calendar_timezone,
             "source": calendar_source,
             "error": calendar_error,
