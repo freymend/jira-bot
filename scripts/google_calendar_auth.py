@@ -60,17 +60,21 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 def _build_authorization_url(
     client_id: str, redirect_uri: str, state: str, code_challenge: str
 ) -> str:
-    return f"{AUTHORIZATION_ENDPOINT}?{urlencode({
-        'client_id': client_id,
-        'redirect_uri': redirect_uri,
-        'response_type': 'code',
-        'scope': CALENDAR_SCOPE,
-        'access_type': 'offline',
-        'prompt': 'consent',
-        'state': state,
-        'code_challenge': code_challenge,
-        'code_challenge_method': 'S256',
-    })}"
+    return f"{AUTHORIZATION_ENDPOINT}?{
+        urlencode(
+            {
+                'client_id': client_id,
+                'redirect_uri': redirect_uri,
+                'response_type': 'code',
+                'scope': CALENDAR_SCOPE,
+                'access_type': 'offline',
+                'prompt': 'consent',
+                'state': state,
+                'code_challenge': code_challenge,
+                'code_challenge_method': 'S256',
+            }
+        )
+    }"
 
 
 def _exchange_code(
@@ -113,9 +117,11 @@ def main() -> None:
 
     state = secrets.token_urlsafe(32)
     code_verifier = secrets.token_urlsafe(64)
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode("ascii")).digest()
-    ).decode("ascii").rstrip("=")
+    code_challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode("ascii")).digest())
+        .decode("ascii")
+        .rstrip("=")
+    )
 
     server = _CallbackServer(("127.0.0.1", 0), _CallbackHandler)
     server.expected_state = state

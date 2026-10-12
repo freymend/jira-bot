@@ -94,8 +94,10 @@ class Settings:
         if llm_context_tokens < 8192:
             raise RuntimeError("LLM_CONTEXT_TOKENS must be at least 8192")
         minimum_prompt_room = 1024 + 256 + 4096 + 512
-        if not 256 <= llm_max_completion_tokens <= (
-            llm_context_tokens - minimum_prompt_room
+        if (
+            not 256
+            <= llm_max_completion_tokens
+            <= (llm_context_tokens - minimum_prompt_room)
         ):
             raise RuntimeError(
                 "LLM_MAX_COMPLETION_TOKENS must be at least 256 and leave "

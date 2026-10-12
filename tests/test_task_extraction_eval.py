@@ -57,10 +57,10 @@ class SyntheticTaskExtractionEvalTests(unittest.TestCase):
                     task["id"],
                 )
 
-    def test_expands_same_segment_pronoun_assignment_but_not_ambiguous_language(self) -> None:
-        assigned_segment = (
-            "Zachary is out today, but let's assign him the parser tests for when he returns."
-        )
+    def test_expands_same_segment_pronoun_assignment_but_not_ambiguous_language(
+        self,
+    ) -> None:
+        assigned_segment = "Zachary is out today, but let's assign him the parser tests for when he returns."
         assignment_quote = "let's assign him the parser tests for when he returns."
         self.assertEqual(
             _expand_owner_quote("Zachary", assignment_quote, assigned_segment),

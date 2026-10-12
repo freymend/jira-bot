@@ -49,15 +49,12 @@ class PromptBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(chunks), 1)
         for chunk in chunks:
             prompt_text = "\n".join(
-                task_extraction._format_transcript_segment(segment)
-                for segment in chunk
+                task_extraction._format_transcript_segment(segment) for segment in chunk
             )
             self.assertLessEqual(len(prompt_text.encode("utf-8")), max_chunk_bytes)
 
     def test_transcript_cache_key_includes_prompt_budget(self) -> None:
-        segments = [
-            {"timestamp_ms": 1000, "speaker_name": "Maya", "text": "hello"}
-        ]
+        segments = [{"timestamp_ms": 1000, "speaker_name": "Maya", "text": "hello"}]
         original_hash = task_extraction._transcript_cache_hash(segments)
         changed_settings = replace(
             settings, llm_context_tokens=settings.llm_context_tokens - 1024
@@ -104,9 +101,7 @@ class PromptBudgetTests(unittest.IsolatedAsyncioTestCase):
                 _response('{"tasks":[]}'),
             ]
         )
-        with patch(
-            "app.integrations.task_extraction.AsyncOpenAI", return_value=client
-        ):
+        with patch("app.integrations.task_extraction.AsyncOpenAI", return_value=client):
             result = await task_extraction.extract_tasks(segments)
 
         self.assertEqual(result.tasks, [])
@@ -139,7 +134,10 @@ class PromptBudgetTests(unittest.IsolatedAsyncioTestCase):
             ]
         }
         context = json.dumps(
-            {"description": "Document the recovery procedure.", "evidence_segment_ids": []}
+            {
+                "description": "Document the recovery procedure.",
+                "evidence_segment_ids": [],
+            }
         )
         client, create = _client(
             [
@@ -148,9 +146,7 @@ class PromptBudgetTests(unittest.IsolatedAsyncioTestCase):
                 _response(context),
             ]
         )
-        with patch(
-            "app.integrations.task_extraction.AsyncOpenAI", return_value=client
-        ):
+        with patch("app.integrations.task_extraction.AsyncOpenAI", return_value=client):
             result = await task_extraction.extract_tasks(segments)
 
         self.assertEqual(len(result.tasks), 1)

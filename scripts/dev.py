@@ -29,7 +29,7 @@ def _is_ready(url: str) -> bool:
     try:
         with urlopen(url, timeout=2) as response:
             return response.status == 200
-    except (OSError, URLError):
+    except OSError, URLError:
         return False
 
 
@@ -260,13 +260,15 @@ def up() -> None:
             ROOT,
             f"http://127.0.0.1:{dashboard_port}/health/live",
         )
-    except (OSError, RuntimeError, subprocess.CalledProcessError, TimeoutError):
+    except OSError, RuntimeError, subprocess.CalledProcessError, TimeoutError:
         _stop_native_services()
         raise
     dashboard_port = _setting("LOCAL_DASHBOARD_PORT", "5006")
     print("API, Attendee, MLX Whisper, and Gemma are running.")
     print(f"Local dashboard: http://127.0.0.1:{dashboard_port}")
-    print("Native logs: .dev-run/mlx-whisper.log, .dev-run/gemma.log, and .dev-run/dashboard.log")
+    print(
+        "Native logs: .dev-run/mlx-whisper.log, .dev-run/gemma.log, and .dev-run/dashboard.log"
+    )
 
 
 def restart_whisper() -> None:
@@ -290,7 +292,9 @@ def down() -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the local meeting assistant stack")
+    parser = argparse.ArgumentParser(
+        description="Run the local meeting assistant stack"
+    )
     parser.add_argument("command", choices=("up", "down", "restart-whisper"))
     args = parser.parse_args()
     try:

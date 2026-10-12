@@ -32,14 +32,19 @@ class GoogleCalendarClient:
         if isinstance(error, dict):
             message = error.get("message")
             errors = error.get("errors")
-            reason = next(
-                (
-                    item.get("reason")
-                    for item in errors
-                    if isinstance(item, dict) and isinstance(item.get("reason"), str)
-                ),
-                None,
-            ) if isinstance(errors, list) else None
+            reason = (
+                next(
+                    (
+                        item.get("reason")
+                        for item in errors
+                        if isinstance(item, dict)
+                        and isinstance(item.get("reason"), str)
+                    ),
+                    None,
+                )
+                if isinstance(errors, list)
+                else None
+            )
             detail = f"Google Calendar returned HTTP {response.status_code}"
             if isinstance(reason, str):
                 detail += f" ({reason})"
