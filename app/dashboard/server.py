@@ -9,7 +9,7 @@ import tempfile
 import threading
 from datetime import time as datetime_time
 from pathlib import Path
-from typing import Any
+
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -20,12 +20,20 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app.schemas import (
+    ConfigField,
+    ConfigResponse,
+    ConfigUpdateResponse,
+    JSONValue,
+    JSONObject,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE = ROOT / ".env"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 _CONFIG_LOCK = threading.Lock()
 
-CONFIG_FIELDS: list[dict[str, str]] = [
+CONFIG_FIELDS: list[ConfigField] = [
     {
         "key": "APP_API_TOKEN",
         "label": "API bearer token",
@@ -326,7 +334,7 @@ _CLEARABLE_SECRETS = {
 
 
 class ConfigUpdate(BaseModel):
-    values: dict[str, Any] = Field(default_factory=dict)
+    values: dict[str, JSONValue] = Field(default_factory=dict)
     clear: list[str] = Field(default_factory=list)
 
 
@@ -368,7 +376,7 @@ def require_dashboard_auth(
     return token
 
 
-def _current_config_response() -> dict[str, Any]:
+def _current_config_response() -> ConfigResponse:
     values = _env_values()
     defaults = {
         key: value
@@ -390,7 +398,7 @@ def _current_config_response() -> dict[str, Any]:
     }
 
 
-def _normalize_value(key: str, raw: Any) -> str:
+def _normalize_value(key: str, raw: JSONValue) -> str:
     field = _FIELD_BY_KEY[key]
     kind = field["type"]
     if kind == "boolean":
@@ -401,11 +409,15 @@ def _normalize_value(key: str, raw: Any) -> str:
             raise ValueError(f"{key} must be a boolean")
         return "true" if value in {"true", "1", "yes", "on"} else "false"
     if kind == "integer":
+        if not isinstance(raw, str | int | float):
+            raise ValueError(f"{key} must be an integer")
         try:
             return str(int(raw))
         except (ValueError, TypeError) as exc:
             raise ValueError(f"{key} must be an integer") from exc
     if kind == "number":
+        if not isinstance(raw, str | int | float):
+            raise ValueError(f"{key} must be a number")
         try:
             value = float(raw)
         except (ValueError, TypeError) as exc:
@@ -569,7 +581,9 @@ async def dashboard_liveness() -> dict[str, str]:
 
 
 @app.get("/api/config")
-async def read_config(_: str = Depends(require_dashboard_auth)) -> dict[str, Any]:
+async def read_config(
+    _: str = Depends(require_dashboard_auth),
+) -> ConfigResponse:
     return _current_config_response()
 
 
@@ -577,7 +591,7 @@ async def read_config(_: str = Depends(require_dashboard_auth)) -> dict[str, Any
 async def update_config(
     update: ConfigUpdate,
     token: str = Depends(require_dashboard_auth),
-) -> dict[str, Any]:
+) -> ConfigUpdateResponse:
     del token
     unknown = (set(update.values) | set(update.clear)) - set(_FIELD_BY_KEY)
     if unknown:
@@ -625,7 +639,7 @@ async def update_config(
 
 
 @app.get("/api/overview")
-async def read_overview(token: str = Depends(require_dashboard_auth)) -> dict[str, Any]:
+async def read_overview(token: str = Depends(require_dashboard_auth)) -> JSONObject:
     values = _env_values()
     try:
         api_port = int(values.get("APP_PORT", "5005"))

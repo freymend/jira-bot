@@ -10,17 +10,53 @@ from app.integrations.screenshare import add_screenshare_context
 from app.integrations.task_extraction import extract_tasks
 from app.integrations.transcript import normalize_segments
 from app.network import is_ambiguous_write_error, is_safe_to_retry_write
+from app.schemas import JiraScreenFrame, PersistedTaskPayload, TaskProposal
 
 logger = logging.getLogger("jira-bot.pipeline")
 attendee = AttendeeClient()
 jira = JiraClient()
 
 
+def _task_payload(proposal: TaskProposal) -> PersistedTaskPayload:
+    return {
+        "summary": proposal.summary,
+        "description": proposal.description,
+        "owner_speaker": proposal.owner_speaker,
+        "owner_evidence_quote": proposal.owner_evidence_quote,
+        "owner_timestamp_ms": proposal.owner_timestamp_ms,
+        "due_date": proposal.due_date.isoformat() if proposal.due_date else None,
+        "priority": proposal.priority,
+        "evidence_quote": proposal.evidence_quote,
+        "timestamp_ms": proposal.timestamp_ms,
+        "context_evidence": [
+            {
+                "quote": evidence.quote,
+                "timestamp_ms": evidence.timestamp_ms,
+                "speaker_name": evidence.speaker_name,
+                "source": evidence.source,
+            }
+            for evidence in proposal.context_evidence
+        ],
+        "visual_evidence": [
+            {
+                "frame_id": evidence.frame_id,
+                "timestamp_ms": evidence.timestamp_ms,
+                "time_source": evidence.time_source,
+                "summary": evidence.summary,
+            }
+            for evidence in proposal.visual_evidence
+        ],
+        "confidence": proposal.confidence,
+    }
+
+
 async def finalize_meeting(bot_id: str) -> None:
     db.set_meeting_status(bot_id, "processing")
     try:
-        meeting = db.get_meeting(bot_id) or {}
-        segments = normalize_segments(meeting.get("transcript"))
+        meeting = db.get_meeting(bot_id)
+        segments = normalize_segments(
+            meeting.get("transcript") if meeting is not None else None
+        )
         if not segments:
             transcript_response = await attendee.get_transcript(bot_id)
             segments = normalize_segments(transcript_response)
@@ -53,9 +89,8 @@ async def finalize_meeting(bot_id: str) -> None:
                 continue
             eligible.append(proposal)
         eligible = await add_screenshare_context(eligible, bot_id)
-        approved = [
-            proposal.model_dump(mode="json", exclude={"context_query"})
-            for proposal in eligible
+        approved: list[PersistedTaskPayload] = [
+            _task_payload(proposal) for proposal in eligible
         ]
 
         has_jira_error = False
@@ -83,7 +118,7 @@ async def finalize_meeting(bot_id: str) -> None:
 
             db.set_task_status(row["id"], "creating")
             try:
-                screen_frames = []
+                screen_frames: list[JiraScreenFrame] = []
                 if settings.jira_attach_screenshare_evidence:
                     screen_frames = [
                         frame
@@ -92,7 +127,7 @@ async def finalize_meeting(bot_id: str) -> None:
                     ]
                 key = await jira.create_issue(
                     item,
-                    meeting.get("meeting_url"),
+                    meeting.get("meeting_url") if meeting is not None else None,
                     screen_frames=screen_frames,
                 )
                 db.set_task_status(row["id"], "created", jira_key=key)

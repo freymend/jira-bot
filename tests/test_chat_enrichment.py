@@ -4,7 +4,6 @@ import json
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -13,6 +12,7 @@ from app.config import settings
 from app.integrations.attendee import AttendeeClient
 from app.integrations.jira import JiraClient
 from app.integrations.task_extraction import extract_tasks
+from app.schemas import ChatMessage, JiraIssueFields, TaskPayload, TranscriptSegment
 
 
 def _response(content: str) -> SimpleNamespace:
@@ -81,15 +81,18 @@ class AttendeeChatRetrievalTests(unittest.IsolatedAsyncioTestCase):
 
 class ChatTaskEnrichmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_chat_enriches_context_without_becoming_task_evidence(self) -> None:
-        transcript = [
+        transcript: list[TranscriptSegment] = [
             {
                 "id": "spoken-1",
                 "timestamp_ms": 1000,
+                "duration_ms": None,
                 "speaker_name": "Maya",
+                "speaker_uuid": None,
                 "text": "I will add a regression test for reconnects.",
+                "raw": {"id": "spoken-1"},
             }
         ]
-        chat_message = {
+        chat_message: ChatMessage = {
             "id": "chat-1",
             "timestamp_ms": 2000,
             "speaker_name": "Leo",
@@ -147,7 +150,16 @@ class ChatTaskEnrichmentTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_jira_marks_chat_citations_as_chat_messages(self) -> None:
-        issue_fields: dict[str, Any] = {}
+        issue_fields: JiraIssueFields = {
+            "project": {"key": ""},
+            "summary": "",
+            "issuetype": {"name": ""},
+            "description": {
+                "type": "doc",
+                "version": 1,
+                "content": [],
+            },
+        }
 
         def handle(request: httpx.Request) -> httpx.Response:
             issue_fields.update(json.loads(request.content)["fields"])
@@ -162,7 +174,7 @@ class ChatTaskEnrichmentTests(unittest.IsolatedAsyncioTestCase):
             jira_project_key="TEST",
             jira_issue_type="Task",
         )
-        task = {
+        task: TaskPayload = {
             "summary": "Add reconnect coverage",
             "evidence_quote": "I will add a regression test for reconnects.",
             "description": "Cover reconnect behavior and HTTP 429 responses.",

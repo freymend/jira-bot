@@ -5,10 +5,12 @@ import json
 import math
 import re
 from collections import Counter
-from typing import Any, Literal, cast
+from collections.abc import Iterable, Sequence
+from typing import Literal, cast
 
 import httpx
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessageParam
 
 from app import db
 from app.config import settings
@@ -17,6 +19,9 @@ from app.integrations.ownership import (
     validated_owner_speaker,
 )
 from app.schemas import (
+    ChatMessage,
+    MeetingContextSegment,
+    TranscriptSegment,
     TaskContextEvidence,
     TaskContextResult,
     TaskExtraction,
@@ -139,7 +144,9 @@ def _compact_utf8(text: str, max_bytes: int) -> str:
     return f"{compacted}…"
 
 
-def _format_transcript_segment(segment: dict[str, Any]) -> str:
+def _format_transcript_segment(
+    segment: TranscriptSegment | MeetingContextSegment,
+) -> str:
     timestamp = (
         segment.get("timestamp_ms") if segment.get("timestamp_ms") is not None else "?"
     )
@@ -148,18 +155,24 @@ def _format_transcript_segment(segment: dict[str, Any]) -> str:
 
 
 def _split_segment_to_bytes(
-    segment: dict[str, Any], max_bytes: int
-) -> list[dict[str, Any]]:
+    segment: TranscriptSegment, max_bytes: int
+) -> list[TranscriptSegment]:
     text = str(segment.get("text", ""))
     if len(_format_transcript_segment(segment).encode("utf-8")) <= max_bytes:
         return [segment]
 
-    empty_line = _format_transcript_segment({**segment, "text": ""})
+    empty_context: MeetingContextSegment = {
+        "text": "",
+        "timestamp_ms": segment["timestamp_ms"],
+        "speaker_name": segment["speaker_name"],
+        "source": segment.get("source", "transcript"),
+    }
+    empty_line = _format_transcript_segment(empty_context)
     text_budget = max_bytes - len(empty_line.encode("utf-8"))
     if text_budget < 4:
         raise RuntimeError("LLM context budget is too small for a transcript segment")
 
-    pieces: list[dict[str, Any]] = []
+    pieces: list[TranscriptSegment] = []
     start = 0
     while start < len(text):
         end = start
@@ -184,8 +197,8 @@ def _split_segment_to_bytes(
 
 
 def _transcript_chunks(
-    segments: list[dict[str, Any]], max_chunk_bytes: int | None = None
-) -> list[list[dict[str, Any]]]:
+    segments: list[TranscriptSegment], max_chunk_bytes: int | None = None
+) -> list[list[TranscriptSegment]]:
     if max_chunk_bytes is None:
         max_chunk_bytes = (
             settings.llm_context_tokens
@@ -197,8 +210,8 @@ def _transcript_chunks(
     if max_chunk_bytes <= 0:
         raise RuntimeError("LLM context leaves no room for transcript input")
 
-    chunks: list[list[dict[str, Any]]] = []
-    current: list[dict[str, Any]] = []
+    chunks: list[list[TranscriptSegment]] = []
+    current: list[TranscriptSegment] = []
     current_bytes = 0
     for segment in segments:
         for piece in _split_segment_to_bytes(segment, max_chunk_bytes - 1):
@@ -228,7 +241,7 @@ def _normalized_text(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
-def _transcript_cache_hash(segments: list[dict[str, Any]]) -> str:
+def _transcript_cache_hash(segments: list[TranscriptSegment]) -> str:
     cache_input = {
         "version": _CACHE_VERSION,
         "model": settings.llm_model,
@@ -254,7 +267,7 @@ def _transcript_cache_hash(segments: list[dict[str, Any]]) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def _chat_context_hash(chat_messages: list[dict[str, Any]]) -> str:
+def _chat_context_hash(chat_messages: list[ChatMessage]) -> str:
     cache_input = [
         {
             "timestamp_ms": message.get("timestamp_ms"),
@@ -316,13 +329,17 @@ def _expand_owner_quote(
     return segment_text
 
 
-def _segment_timestamp(segment: dict[str, Any]) -> int | None:
+def _segment_timestamp(
+    segment: TranscriptSegment | MeetingContextSegment,
+) -> int | None:
     value = segment.get("timestamp_ms")
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _find_segment_index(
-    segments: list[dict[str, Any]], quote: str, timestamp_hint: int | None = None
+    segments: Sequence[TranscriptSegment | MeetingContextSegment],
+    quote: str,
+    timestamp_hint: int | None = None,
 ) -> int | None:
     normalized_quote = _normalized_text(quote)
     if not normalized_quote:
@@ -359,7 +376,7 @@ def _context_terms(*values: str) -> set[str]:
 
 
 def _rank_related_segments(
-    segments: list[dict[str, Any]], query: str, *, limit: int = 6
+    segments: Sequence[MeetingContextSegment], query: str, *, limit: int = 6
 ) -> list[int]:
     query_terms = _context_terms(query)
     if not query_terms or not segments:
@@ -413,7 +430,7 @@ def _fit_excerpt_bytes(
 
 
 def _segment_excerpt(
-    segment: dict[str, Any],
+    segment: MeetingContextSegment,
     *,
     anchor_quotes: tuple[str, ...],
     search_terms: tuple[str, ...],
@@ -442,7 +459,7 @@ def _segment_excerpt(
 
 
 def _task_context_packet(
-    segments: list[dict[str, Any]],
+    segments: Sequence[MeetingContextSegment],
     task: TaskProposal,
     *,
     max_context_bytes: int,
@@ -550,10 +567,11 @@ def _task_context_packet(
                 f"[{segment_id} | {source} | {timestamp} | {speaker}] {excerpt}",
             )
         )
+        speaker_name = segment.get("speaker_name")
         evidence_by_id[segment_id] = TaskContextEvidence(
             quote=excerpt,
             timestamp_ms=timestamp_ms,
-            speaker_name=segment.get("speaker_name"),
+            speaker_name=(speaker_name if isinstance(speaker_name, str) else None),
             source=cast(
                 Literal["transcript", "chat"],
                 source if source in {"transcript", "chat"} else "transcript",
@@ -566,20 +584,31 @@ def _task_context_packet(
 async def _add_task_context(
     client: AsyncOpenAI,
     task: TaskProposal,
-    segments: list[dict[str, Any]],
+    segments: list[TranscriptSegment],
     *,
-    chat_messages: list[dict[str, Any]] | None = None,
+    chat_messages: list[ChatMessage] | None = None,
     max_context_bytes: int | None = None,
 ) -> TaskProposal:
     chat_messages = chat_messages or []
-    context_segments = [
-        *segments,
-        *(
-            {**message, "source": "chat"}
-            for message in chat_messages
-            if str(message.get("text") or "").strip()
-        ),
+    context_segments: list[MeetingContextSegment] = [
+        {
+            "text": segment["text"],
+            "timestamp_ms": segment["timestamp_ms"],
+            "speaker_name": segment["speaker_name"],
+            "source": segment.get("source", "transcript"),
+        }
+        for segment in segments
     ]
+    context_segments.extend(
+        {
+            "text": message["text"],
+            "timestamp_ms": message["timestamp_ms"],
+            "speaker_name": message["speaker_name"],
+            "source": "chat",
+        }
+        for message in chat_messages
+        if str(message.get("text") or "").strip()
+    )
     system_prompt = (
         "Write a useful Jira task description using the meeting transcript and chat "
         "excerpts. Explain relevant background, the intended outcome, and stated "
@@ -648,7 +677,7 @@ async def _add_task_context(
             model=settings.llm_model,
             temperature=0,
             response_format={"type": "json_object"},
-            messages=cast(Any, messages),
+            messages=cast(Iterable[ChatCompletionMessageParam], messages),
             max_tokens=context_output_tokens,
         )
     except Exception as exc:
@@ -693,7 +722,7 @@ async def _add_task_context(
 
 
 async def _extract_chunk(
-    client: AsyncOpenAI, chunk: list[dict[str, Any]]
+    client: AsyncOpenAI, chunk: list[TranscriptSegment]
 ) -> TaskExtraction:
     transcript = "\n".join(_format_transcript_segment(segment) for segment in chunk)
     messages = [
@@ -774,7 +803,7 @@ async def _extract_chunk(
         model=settings.llm_model,
         temperature=0,
         response_format={"type": "json_object"},
-        messages=cast(Any, messages),
+        messages=cast(Iterable[ChatCompletionMessageParam], messages),
         max_tokens=max_completion_tokens,
     )
     content = response.choices[0].message.content or '{"tasks":[]}'
@@ -782,8 +811,8 @@ async def _extract_chunk(
 
 
 def _split_chunk_for_compaction(
-    chunk: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    chunk: list[TranscriptSegment],
+) -> tuple[list[TranscriptSegment], list[TranscriptSegment]] | None:
     if len(chunk) > 2:
         midpoint = len(chunk) // 2
         return chunk[: midpoint + 1], chunk[midpoint:]
@@ -806,14 +835,14 @@ def _split_chunk_for_compaction(
     if boundaries:
         midpoint = min(boundaries, key=lambda boundary: abs(boundary - midpoint))
     overlap = min(128, midpoint // 8, (len(text) - midpoint) // 8)
-    left = {**segment, "text": text[: midpoint + overlap]}
-    right = {**segment, "text": text[midpoint - overlap :]}
+    left: TranscriptSegment = {**segment, "text": text[: midpoint + overlap]}
+    right: TranscriptSegment = {**segment, "text": text[midpoint - overlap :]}
     return [left], [right]
 
 
 async def _extract_chunk_checkpointed(
     client: AsyncOpenAI,
-    chunk: list[dict[str, Any]],
+    chunk: list[TranscriptSegment],
     *,
     bot_id: str | None,
     transcript_hash: str | None,
@@ -831,14 +860,20 @@ async def _extract_chunk_checkpointed(
                     bot_id, transcript_hash, stage, item_key
                 )
 
-    parts: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None
+    parts: tuple[list[TranscriptSegment], list[TranscriptSegment]] | None = None
     if bot_id is not None and transcript_hash is not None:
         plan = db.get_extraction_checkpoint(
             bot_id, transcript_hash, plan_stage, item_key
         )
-        if plan is not None:
+        if isinstance(plan, dict):
             parts = _split_chunk_for_compaction(chunk)
-            if parts is None or len(parts) != plan.get("part_count"):
+            part_count = plan.get("part_count")
+            if (
+                parts is None
+                or not isinstance(part_count, int)
+                or isinstance(part_count, bool)
+                or len(parts) != part_count
+            ):
                 db.delete_extraction_checkpoint(
                     bot_id, transcript_hash, plan_stage, item_key
                 )
@@ -899,10 +934,10 @@ async def _extract_chunk_checkpointed(
 
 
 async def extract_tasks(
-    segments: list[dict[str, Any]],
+    segments: list[TranscriptSegment],
     *,
     bot_id: str | None = None,
-    chat_messages: list[dict[str, Any]] | None = None,
+    chat_messages: list[ChatMessage] | None = None,
 ) -> TaskExtraction:
     chat_messages = chat_messages or []
     chat_context_hash = _chat_context_hash(chat_messages)
@@ -969,18 +1004,18 @@ async def extract_tasks(
                     owner_index = None
 
                 action_segment = segments[action_index]
-                owner_segment = segments[owner_index] if owner_index is not None else {}
+                owner_timestamp_ms = (
+                    _segment_timestamp(segments[owner_index])
+                    if owner_index is not None
+                    else None
+                )
                 candidates.append(
                     task.model_copy(
                         update={
                             "timestamp_ms": _segment_timestamp(action_segment),
                             "owner_speaker": validated_owner,
                             "owner_evidence_quote": owner_quote,
-                            "owner_timestamp_ms": (
-                                _segment_timestamp(owner_segment)
-                                if owner_index is not None
-                                else None
-                            ),
+                            "owner_timestamp_ms": owner_timestamp_ms,
                         }
                     )
                 )

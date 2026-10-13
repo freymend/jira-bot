@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from app.config import settings
+from app.schemas import CalendarEvent, CalendarWatchResponse
 
 
 class GoogleCalendarClient:
@@ -80,7 +80,7 @@ class GoogleCalendarClient:
 
     async def list_events(
         self, time_min: datetime, time_max: datetime
-    ) -> list[dict[str, Any]]:
+    ) -> list[CalendarEvent]:
         access_token = await self._get_access_token()
         url = (
             "https://www.googleapis.com/calendar/v3/calendars/"
@@ -94,7 +94,7 @@ class GoogleCalendarClient:
             "showDeleted": "false",
             "maxResults": 250,
         }
-        events: list[dict[str, Any]] = []
+        events: list[CalendarEvent] = []
         while True:
             response = await self.client.get(
                 url,
@@ -117,7 +117,7 @@ class GoogleCalendarClient:
 
     async def sync_events(
         self, sync_token: str | None
-    ) -> tuple[list[dict[str, Any]], str]:
+    ) -> tuple[list[CalendarEvent], str]:
         access_token = await self._get_access_token()
         url = (
             "https://www.googleapis.com/calendar/v3/calendars/"
@@ -136,7 +136,7 @@ class GoogleCalendarClient:
                 - timedelta(minutes=settings.google_calendar_join_grace_minutes + 1)
             ).isoformat()
 
-        events: list[dict[str, Any]] = []
+        events: list[CalendarEvent] = []
         page_token: str | None = None
         next_sync_token: str | None = None
         while True:
@@ -173,7 +173,7 @@ class GoogleCalendarClient:
         callback_url: str,
         channel_token: str,
         expiration_ms: int,
-    ) -> dict[str, Any]:
+    ) -> CalendarWatchResponse:
         access_token = await self._get_access_token()
         url = (
             "https://www.googleapis.com/calendar/v3/calendars/"
@@ -194,7 +194,7 @@ class GoogleCalendarClient:
         result = response.json()
         if not isinstance(result, dict):
             raise RuntimeError("Google Calendar returned an invalid watch response")
-        return result
+        return CalendarWatchResponse(**result)
 
     async def stop_watching(self, channel_id: str, resource_id: str) -> None:
         access_token = await self._get_access_token()

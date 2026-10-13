@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -12,7 +11,7 @@ import httpx
 from app import db
 from app.config import settings
 from app.pipeline import finalize_meeting
-from app.schemas import TaskExtraction, TaskProposal
+from app.schemas import MeetingTaskRecord, TaskExtraction, TaskProposal
 
 
 class PipelineNetworkResilienceTests(unittest.IsolatedAsyncioTestCase):
@@ -64,7 +63,7 @@ class PipelineNetworkResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.db_settings_patch.stop()
         self.temp_dir.cleanup()
 
-    def _stored_task(self) -> dict[str, Any]:
+    def _stored_task(self) -> MeetingTaskRecord:
         meeting = db.get_meeting("bot-network")
         self.assertIsNotNone(meeting)
         assert meeting is not None

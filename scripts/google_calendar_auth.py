@@ -7,7 +7,6 @@ import secrets
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
@@ -53,7 +52,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(message)
 
-    def log_message(self, _format: str, *_args: Any) -> None:
+    def log_message(self, _format: str, *_args: object) -> None:
         return
 
 

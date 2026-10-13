@@ -8,7 +8,6 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -27,6 +26,13 @@ from app.calendar_scheduler import (
 )
 from app.config import settings
 from app.integrations.google_calendar import GoogleCalendarClient
+from app.schemas import (
+    CalendarEvent,
+    CalendarSyncDelete,
+    CalendarSyncUpsert,
+    CalendarWatchResponse,
+    CreatedAttendeeBot,
+)
 
 
 class FakeAttendee:
@@ -34,7 +40,7 @@ class FakeAttendee:
         self.calls: list[str] = []
         self.fail = fail
 
-    async def create_bot(self, meeting_url: str) -> dict[str, str]:
+    async def create_bot(self, meeting_url: str) -> CreatedAttendeeBot:
         self.calls.append(meeting_url)
         if self.fail:
             raise RuntimeError("request outcome unknown")
@@ -52,7 +58,7 @@ class FakeWatchClient:
         callback_url: str,
         channel_token: str,
         expiration_ms: int,
-    ) -> dict[str, Any]:
+    ) -> CalendarWatchResponse:
         self.callback_url = callback_url
         return {"resourceId": "resource-1", "expiration": expiration_ms}
 
@@ -61,13 +67,13 @@ class FakeWatchClient:
 
 
 class FakeSyncClient:
-    def __init__(self, event_pages: list[list[dict[str, Any]]]) -> None:
+    def __init__(self, event_pages: list[list[CalendarEvent]]) -> None:
         self.event_pages = event_pages
         self.tokens: list[str | None] = []
 
     async def sync_events(
         self, sync_token: str | None
-    ) -> tuple[list[dict[str, Any]], str]:
+    ) -> tuple[list[CalendarEvent], str]:
         self.tokens.append(sync_token)
         return self.event_pages[len(self.tokens) - 1], f"sync-{len(self.tokens)}"
 
@@ -104,7 +110,7 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
         self.settings_patch.stop()
         self.temp_dir.cleanup()
 
-    def _event(self, start: datetime | None = None) -> dict[str, Any]:
+    def _event(self, start: datetime | None = None) -> CalendarEvent:
         local_start = start or datetime(
             2026, 10, 13, 10, 0, tzinfo=ZoneInfo("America/Los_Angeles")
         )
@@ -273,7 +279,7 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
 
             async def sync_events(
                 self, sync_token: str | None
-            ) -> tuple[list[dict[str, Any]], str]:
+            ) -> tuple[list[CalendarEvent], str]:
                 self.tokens.append(sync_token)
                 if sync_token:
                     request = httpx.Request("GET", "https://calendar.test/events")
@@ -290,7 +296,7 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_push_sync_upserts_and_removes_occurrences(self) -> None:
         event = self._event()
-        cancelled_event = {**event, "status": "cancelled"}
+        cancelled_event: CalendarEvent = {**event, "status": "cancelled"}
         calendar = FakeSyncClient([[event], [cancelled_event]])
 
         self.assertEqual(await sync_calendar_events(calendar), 1)
@@ -318,7 +324,7 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_incremental_sync_changes_and_token_commit_together(self) -> None:
-        event = {
+        event: CalendarSyncUpsert = {
             "action": "upsert",
             "event_key": "occurrence-key",
             "calendar_event_id": "occurrence-1",
@@ -336,11 +342,11 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(stored_events), 1)
         self.assertEqual(stored_events[0]["event_end"], "2026-10-13T18:00:00+00:00")
 
-        db.apply_calendar_sync(
-            "primary",
-            [{"action": "delete", "event_key": "occurrence-key"}],
-            "sync-token-2",
-        )
+        deletion: CalendarSyncDelete = {
+            "action": "delete",
+            "event_key": "occurrence-key",
+        }
+        db.apply_calendar_sync("primary", [deletion], "sync-token-2")
         self.assertEqual(db.get_calendar_sync_token("primary"), "sync-token-2")
         self.assertEqual(
             db.list_due_calendar_events(

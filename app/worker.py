@@ -6,11 +6,11 @@ import os
 import signal
 import socket
 import time
-from typing import Any
 
 from app import db
 from app.network import is_transient_network_error, retry_after_seconds
 from app.pipeline import attendee, finalize_meeting
+from app.schemas import BackgroundJob
 
 POLL_INTERVAL_SECONDS = 2
 HEARTBEAT_INTERVAL_SECONDS = 10
@@ -28,7 +28,7 @@ async def _maintain_lease(job_id: int, worker_id: str) -> None:
             return
 
 
-async def _process_job(job: dict[str, Any], worker_id: str) -> None:
+async def _process_job(job: BackgroundJob, worker_id: str) -> None:
     job_id = int(job["id"])
     bot_id = str(job["bot_id"])
     attempts = int(job["attempts"])

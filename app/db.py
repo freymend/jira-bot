@@ -9,10 +9,29 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
-
 from app.config import settings
+from app.schemas import (
+    BackgroundJob,
+    CalendarAutoJoin,
+    CalendarScheduledEvent,
+    CalendarSyncChange,
+    CalendarWatchChannel,
+    JSONValue,
+    JSONObject,
+    MeetingLeaveCandidate,
+    MeetingLeaveRetry,
+    MeetingRecord,
+    MeetingTaskRecord,
+    PersistedTaskPayload,
+    RecentMeeting,
+    RecentTranscriptSegment,
+    ScreenFrameRecord,
+    TranscriptSegment,
+)
 from app.db_migrations import apply_migrations
+
+
+type SQLiteParameter = str | int | float | None
 
 
 def _now() -> str:
@@ -121,7 +140,7 @@ def mark_stale_calendar_auto_joins_uncertain(*, stale_after_seconds: int = 300) 
         return result.rowcount
 
 
-def list_calendar_auto_joins(limit: int = 20) -> list[dict[str, Any]]:
+def list_calendar_auto_joins(limit: int = 20) -> list[CalendarAutoJoin]:
     bounded_limit = min(max(limit, 1), 100)
     with _connect() as connection:
         rows = connection.execute(
@@ -131,7 +150,20 @@ def list_calendar_auto_joins(limit: int = 20) -> list[dict[str, Any]]:
                ORDER BY event_start DESC LIMIT ?""",
             (bounded_limit,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        result: list[CalendarAutoJoin] = []
+        for row in rows:
+            result.append(
+                {
+                    "calendar_event_id": row["calendar_event_id"],
+                    "event_start": row["event_start"],
+                    "status": row["status"],
+                    "bot_id": row["bot_id"],
+                    "error": row["error"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return result
 
 
 def get_calendar_sync_token(calendar_id: str) -> str | None:
@@ -152,7 +184,7 @@ def clear_calendar_sync_token(calendar_id: str) -> None:
 
 def apply_calendar_sync(
     calendar_id: str,
-    changes: list[dict[str, Any]],
+    changes: list[CalendarSyncChange],
     sync_token: str,
     *,
     replace_all: bool = False,
@@ -205,7 +237,7 @@ def apply_calendar_sync(
 
 def list_due_calendar_events(
     calendar_id: str, time_min: str, time_max: str
-) -> list[dict[str, Any]]:
+) -> list[CalendarScheduledEvent]:
     with _connect() as connection:
         rows = connection.execute(
             """SELECT event_key, calendar_event_id, event_start, event_end, meeting_url
@@ -214,7 +246,18 @@ def list_due_calendar_events(
                ORDER BY event_start LIMIT 100""",
             (calendar_id, time_min, time_max),
         ).fetchall()
-        return [dict(row) for row in rows]
+        result: list[CalendarScheduledEvent] = []
+        for row in rows:
+            result.append(
+                {
+                    "event_key": row["event_key"],
+                    "calendar_event_id": row["calendar_event_id"],
+                    "event_start": row["event_start"],
+                    "event_end": row["event_end"],
+                    "meeting_url": row["meeting_url"],
+                }
+            )
+        return result
 
 
 def create_calendar_watch_channel(
@@ -242,7 +285,7 @@ def activate_calendar_watch_channel(
         )
 
 
-def get_calendar_watch_channel(channel_id: str) -> dict[str, Any] | None:
+def get_calendar_watch_channel(channel_id: str) -> CalendarWatchChannel | None:
     with _connect() as connection:
         row = connection.execute(
             """SELECT channel_id, calendar_id, channel_token, resource_id,
@@ -250,10 +293,19 @@ def get_calendar_watch_channel(channel_id: str) -> dict[str, Any] | None:
                FROM calendar_watch_channels WHERE channel_id=?""",
             (channel_id,),
         ).fetchone()
-        return dict(row) if row is not None else None
+        if row is None:
+            return None
+        return {
+            "channel_id": row["channel_id"],
+            "calendar_id": row["calendar_id"],
+            "channel_token": row["channel_token"],
+            "resource_id": row["resource_id"],
+            "expiration_ms": row["expiration_ms"],
+            "status": row["status"],
+        }
 
 
-def get_current_calendar_watch(calendar_id: str) -> dict[str, Any] | None:
+def get_current_calendar_watch(calendar_id: str) -> CalendarWatchChannel | None:
     with _connect() as connection:
         row = connection.execute(
             """SELECT channel_id, calendar_id, channel_token, resource_id,
@@ -263,7 +315,16 @@ def get_current_calendar_watch(calendar_id: str) -> dict[str, Any] | None:
                ORDER BY created_at DESC LIMIT 1""",
             (calendar_id,),
         ).fetchone()
-        return dict(row) if row is not None else None
+        if row is None:
+            return None
+        return {
+            "channel_id": row["channel_id"],
+            "calendar_id": row["calendar_id"],
+            "channel_token": row["channel_token"],
+            "resource_id": row["resource_id"],
+            "expiration_ms": row["expiration_ms"],
+            "status": row["status"],
+        }
 
 
 def delete_calendar_watch_channel(channel_id: str) -> None:
@@ -280,7 +341,7 @@ def update_bot_state(bot_id: str, bot_state: str) -> None:
         )
 
 
-def list_meetings_for_leave_check() -> list[dict[str, Any]]:
+def list_meetings_for_leave_check() -> list[MeetingLeaveCandidate]:
     with _connect() as connection:
         rows = connection.execute(
             """SELECT m.bot_id, m.created_at, m.scheduled_end_at,
@@ -299,7 +360,26 @@ def list_meetings_for_leave_check() -> list[dict[str, Any]]:
                WHERE m.bot_state='joined_recording' AND m.leave_status='not_requested'
                ORDER BY m.created_at"""
         ).fetchall()
-        return [dict(row) for row in rows]
+        result: list[MeetingLeaveCandidate] = []
+        for row in rows:
+            result.append(
+                {
+                    "bot_id": row["bot_id"],
+                    "created_at": row["created_at"],
+                    "scheduled_end_at": row["scheduled_end_at"],
+                    "last_transcript_received_at": row["last_transcript_received_at"],
+                    "leave_evaluated_activity_at": row["leave_evaluated_activity_at"],
+                    "leave_evaluation_started_at": row["leave_evaluation_started_at"],
+                    "participant_tracking_enabled": row["participant_tracking_enabled"],
+                    "participant_presence_initialized": row[
+                        "participant_presence_initialized"
+                    ],
+                    "last_participant_event_at": row["last_participant_event_at"],
+                    "active_participant_count": row["active_participant_count"],
+                    "meeting_host_names": row["meeting_host_names"],
+                }
+            )
+        return result
 
 
 def record_participant_event(
@@ -374,7 +454,7 @@ def record_participant_event(
 
 def list_uncertain_meeting_leave_retries(
     *, retry_after_seconds: int = 60, now: datetime | None = None
-) -> list[dict[str, Any]]:
+) -> list[MeetingLeaveRetry]:
     cutoff = (
         (now or datetime.now(UTC)) - timedelta(seconds=retry_after_seconds)
     ).isoformat()
@@ -387,7 +467,15 @@ def list_uncertain_meeting_leave_retries(
                ORDER BY leave_requested_at""",
             (cutoff,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        result: list[MeetingLeaveRetry] = []
+        for row in rows:
+            result.append(
+                {
+                    "bot_id": row["bot_id"],
+                    "leave_requested_at": row["leave_requested_at"],
+                }
+            )
+        return result
 
 
 def claim_uncertain_meeting_leave_retry(
@@ -414,7 +502,7 @@ def claim_uncertain_meeting_leave_retry(
 
 def get_recent_transcript_segments(
     bot_id: str, limit: int = 40
-) -> list[dict[str, Any]]:
+) -> list[RecentTranscriptSegment]:
     bounded_limit = min(max(limit, 1), 100)
     with _connect() as connection:
         rows = connection.execute(
@@ -423,7 +511,16 @@ def get_recent_transcript_segments(
                ORDER BY rowid DESC LIMIT ?""",
             (bot_id, bounded_limit),
         ).fetchall()
-        return [dict(row) for row in reversed(rows)]
+        result: list[RecentTranscriptSegment] = []
+        for row in reversed(rows):
+            result.append(
+                {
+                    "timestamp_ms": row["timestamp_ms"],
+                    "speaker_name": row["speaker_name"],
+                    "text": row["text"],
+                }
+            )
+        return result
 
 
 def claim_meeting_leave_evaluation(
@@ -498,7 +595,7 @@ def claim_meeting_leave(
         " AND (?=0 OR last_transcript_received_at IS ?)"
         " AND (?=0 OR last_participant_event_at IS ?)"
     )
-    parameters: tuple[Any, ...] = (
+    parameters: tuple[SQLiteParameter, ...] = (
         reason,
         now,
         bot_id,
@@ -547,7 +644,7 @@ def record_webhook(
     event_id: str,
     bot_id: str,
     trigger: str,
-    payload: dict[str, Any],
+    payload: JSONObject,
     *,
     enqueue_finalization: bool = False,
 ) -> bool:
@@ -581,7 +678,7 @@ def record_webhook(
         return result.rowcount == 1
 
 
-def save_segments(bot_id: str, segments: list[dict[str, Any]]) -> None:
+def save_segments(bot_id: str, segments: list[TranscriptSegment]) -> None:
     with _connect() as connection:
         changed = False
         for segment in segments:
@@ -635,7 +732,7 @@ def save_segments(bot_id: str, segments: list[dict[str, Any]]) -> None:
             )
 
 
-def save_final_transcript(bot_id: str, segments: list[dict[str, Any]]) -> None:
+def save_final_transcript(bot_id: str, segments: list[TranscriptSegment]) -> None:
     with _connect() as connection:
         connection.execute(
             "UPDATE meetings SET transcript_json=?, transcription_state='complete' WHERE bot_id=?",
@@ -737,7 +834,7 @@ def store_screen_frame(
 
 def get_screen_frames_near(
     bot_id: str, timestamp_ms: int, *, window_ms: int, limit: int = 2
-) -> list[dict[str, Any]]:
+) -> list[ScreenFrameRecord]:
     with _connect() as connection:
         rows = connection.execute(
             """SELECT id, bot_id, timestamp_ms, time_source, participant_uuid,
@@ -754,10 +851,23 @@ def get_screen_frames_near(
                 limit,
             ),
         ).fetchall()
-        return [dict(row) for row in rows]
+        result: list[ScreenFrameRecord] = []
+        for row in rows:
+            result.append(
+                {
+                    "id": row["id"],
+                    "bot_id": row["bot_id"],
+                    "timestamp_ms": row["timestamp_ms"],
+                    "time_source": row["time_source"],
+                    "participant_uuid": row["participant_uuid"],
+                    "frame_data": row["frame_data"],
+                    "summary": row["summary"],
+                }
+            )
+        return result
 
 
-def get_screen_frame(bot_id: str, frame_id: int) -> dict[str, Any] | None:
+def get_screen_frame(bot_id: str, frame_id: int) -> ScreenFrameRecord | None:
     with _connect() as connection:
         row = connection.execute(
             """SELECT id, bot_id, timestamp_ms, time_source, participant_uuid,
@@ -765,7 +875,17 @@ def get_screen_frame(bot_id: str, frame_id: int) -> dict[str, Any] | None:
                FROM screen_frames WHERE bot_id=? AND id=?""",
             (bot_id, frame_id),
         ).fetchone()
-        return dict(row) if row is not None else None
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "bot_id": row["bot_id"],
+            "timestamp_ms": row["timestamp_ms"],
+            "time_source": row["time_source"],
+            "participant_uuid": row["participant_uuid"],
+            "frame_data": row["frame_data"],
+            "summary": row["summary"],
+        }
 
 
 def save_screen_frame_summary(frame_id: int, summary: str) -> None:
@@ -795,7 +915,7 @@ def clear_stale_extraction_checkpoints(bot_id: str, transcript_hash: str) -> Non
 
 def get_extraction_checkpoint(
     bot_id: str, transcript_hash: str, stage: str, item_key: str
-) -> dict[str, Any] | None:
+) -> JSONValue | None:
     with _connect() as connection:
         row = connection.execute(
             """SELECT result_json FROM task_extraction_cache
@@ -831,7 +951,7 @@ def save_extraction_checkpoint(
     transcript_hash: str,
     stage: str,
     item_key: str,
-    result: dict[str, Any],
+    result: JSONValue,
 ) -> None:
     with _connect() as connection:
         connection.execute(
@@ -888,7 +1008,7 @@ def enqueue_finalization(bot_id: str, *, allow_reprocess: bool = False) -> str:
         return "processing" if status == "running" else status
 
 
-def claim_next_job(worker_id: str, *, lease_seconds: int = 60) -> dict[str, Any] | None:
+def claim_next_job(worker_id: str, *, lease_seconds: int = 60) -> BackgroundJob | None:
     now = time.time()
     with _connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -918,7 +1038,21 @@ def claim_next_job(worker_id: str, *, lease_seconds: int = 60) -> dict[str, Any]
         claimed = connection.execute(
             "SELECT * FROM background_jobs WHERE id=?", (job_id,)
         ).fetchone()
-        return dict(claimed) if claimed is not None else None
+        if claimed is None:
+            return None
+        return {
+            "id": claimed["id"],
+            "kind": claimed["kind"],
+            "bot_id": claimed["bot_id"],
+            "status": claimed["status"],
+            "attempts": claimed["attempts"],
+            "available_at": claimed["available_at"],
+            "lease_until": claimed["lease_until"],
+            "locked_by": claimed["locked_by"],
+            "last_error": claimed["last_error"],
+            "created_at": claimed["created_at"],
+            "updated_at": claimed["updated_at"],
+        }
 
 
 def renew_job_lease(job_id: int, worker_id: str, *, lease_seconds: int = 60) -> bool:
@@ -1015,7 +1149,7 @@ def set_meeting_status(bot_id: str, status: str, error: str | None = None) -> No
         )
 
 
-def add_task(bot_id: str, task: dict[str, Any]) -> tuple[sqlite3.Row, bool]:
+def add_task(bot_id: str, task: PersistedTaskPayload) -> tuple[sqlite3.Row, bool]:
     fingerprint_input = "\n".join(
         [
             (task.get("owner_speaker") or "").strip().casefold(),
@@ -1101,7 +1235,7 @@ def is_screenshare_capture_enabled(bot_id: str) -> bool:
         return row is not None and bool(row["screenshare_capture_enabled"])
 
 
-def list_recent_meetings(limit: int = 25) -> list[dict[str, Any]]:
+def list_recent_meetings(limit: int = 25) -> list[RecentMeeting]:
     bounded_limit = min(max(limit, 1), 100)
     with _connect() as connection:
         rows = connection.execute(
@@ -1114,28 +1248,85 @@ def list_recent_meetings(limit: int = 25) -> list[dict[str, Any]]:
                LIMIT ?""",
             (bounded_limit,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        result: list[RecentMeeting] = []
+        for row in rows:
+            result.append(
+                {
+                    "bot_id": row["bot_id"],
+                    "meeting_url": row["meeting_url"],
+                    "created_at": row["created_at"],
+                    "bot_state": row["bot_state"],
+                    "transcription_state": row["transcription_state"],
+                    "status": row["status"],
+                    "error": row["error"],
+                    "task_count": row["task_count"],
+                }
+            )
+        return result
 
 
-def get_meeting(bot_id: str) -> dict[str, Any] | None:
+def get_meeting(bot_id: str) -> MeetingRecord | None:
     with _connect() as connection:
         meeting = connection.execute(
             "SELECT * FROM meetings WHERE bot_id=?", (bot_id,)
         ).fetchone()
         if meeting is None:
             return None
-        result = dict(meeting)
-        result["transcript"] = json.loads(result.pop("transcript_json") or "null")
-        result["tasks"] = []
+
+        tasks: list[MeetingTaskRecord] = []
         for row in connection.execute(
             "SELECT * FROM tasks WHERE bot_id=? ORDER BY id", (bot_id,)
         ):
-            task = dict(row)
-            task["context_evidence"] = json.loads(
-                task.pop("context_evidence_json", "[]") or "[]"
+            tasks.append(
+                {
+                    "id": row["id"],
+                    "bot_id": row["bot_id"],
+                    "fingerprint": row["fingerprint"],
+                    "summary": row["summary"],
+                    "description": row["description"],
+                    "owner_speaker": row["owner_speaker"],
+                    "owner_evidence_quote": row["owner_evidence_quote"],
+                    "owner_timestamp_ms": row["owner_timestamp_ms"],
+                    "due_date": row["due_date"],
+                    "priority": row["priority"],
+                    "evidence_quote": row["evidence_quote"],
+                    "timestamp_ms": row["timestamp_ms"],
+                    "context_evidence": json.loads(
+                        row["context_evidence_json"] or "[]"
+                    ),
+                    "visual_evidence": json.loads(row["visual_evidence_json"] or "[]"),
+                    "confidence": row["confidence"],
+                    "status": row["status"],
+                    "jira_key": row["jira_key"],
+                    "error": row["error"],
+                }
             )
-            task["visual_evidence"] = json.loads(
-                task.pop("visual_evidence_json", "[]") or "[]"
-            )
-            result["tasks"].append(task)
-        return result
+
+        return {
+            "bot_id": meeting["bot_id"],
+            "meeting_url": meeting["meeting_url"],
+            "created_at": meeting["created_at"],
+            "transcription_state": meeting["transcription_state"],
+            "status": meeting["status"],
+            "error": meeting["error"],
+            "bot_state": meeting["bot_state"],
+            "transcript": json.loads(meeting["transcript_json"] or "null"),
+            "recording_started_at_ms": meeting["recording_started_at_ms"],
+            "screen_frame_origin_ms": meeting["screen_frame_origin_ms"],
+            "screen_frame_origin_source": meeting["screen_frame_origin_source"],
+            "screenshare_capture_enabled": meeting["screenshare_capture_enabled"],
+            "scheduled_end_at": meeting["scheduled_end_at"],
+            "last_transcript_received_at": meeting["last_transcript_received_at"],
+            "leave_evaluated_activity_at": meeting["leave_evaluated_activity_at"],
+            "leave_evaluation_started_at": meeting["leave_evaluation_started_at"],
+            "leave_status": meeting["leave_status"],
+            "leave_requested_at": meeting["leave_requested_at"],
+            "leave_reason": meeting["leave_reason"],
+            "participant_tracking_enabled": meeting["participant_tracking_enabled"],
+            "participant_presence_initialized": meeting[
+                "participant_presence_initialized"
+            ],
+            "last_participant_event_at": meeting["last_participant_event_at"],
+            "leave_attempt_count": meeting["leave_attempt_count"],
+            "tasks": tasks,
+        }

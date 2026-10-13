@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any
+from app.schemas import JSONValue, JSONObject, TranscriptSegment
 
 
-def _text_from_item(item: dict[str, Any]) -> str:
+def _text_from_item(item: JSONObject) -> str:
     transcription = item.get("transcription")
     if isinstance(transcription, dict):
         transcription = transcription.get("transcript") or transcription.get("text")
@@ -12,7 +12,7 @@ def _text_from_item(item: dict[str, Any]) -> str:
     return str(transcription or "").strip()
 
 
-def normalize_segments(value: Any) -> list[dict[str, Any]]:
+def normalize_segments(value: JSONValue) -> list[TranscriptSegment]:
     if isinstance(value, dict):
         for key in ("results", "segments", "transcriptions", "items", "transcript"):
             nested = value.get(key)
@@ -23,7 +23,7 @@ def normalize_segments(value: Any) -> list[dict[str, Any]]:
             value = [value]
     if not isinstance(value, list):
         return []
-    segments: list[dict[str, Any]] = []
+    segments: list[TranscriptSegment] = []
     for item in value:
         if not isinstance(item, dict):
             continue

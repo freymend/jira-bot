@@ -1,21 +1,32 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import httpx
 
 from app.config import settings
 from app.integrations.ownership import validated_owner_speaker
+from app.schemas import (
+    JiraBlock,
+    JiraDocument,
+    JiraHeading,
+    JiraIssueFields,
+    JiraParagraph,
+    JiraScreenFrame,
+    JiraTextNode,
+    PersistedTaskPayload,
+    TaskPayload,
+)
 
 logger = logging.getLogger("jira-bot.jira")
 
 
-def _paragraph(text: str) -> dict[str, Any]:
-    return {"type": "paragraph", "content": [{"type": "text", "text": text}]}
+def _paragraph(text: str) -> JiraParagraph:
+    text_node: JiraTextNode = {"type": "text", "text": text}
+    return {"type": "paragraph", "content": [text_node]}
 
 
-def _heading(text: str) -> dict[str, Any]:
+def _heading(text: str) -> JiraHeading:
     return {
         "type": "heading",
         "attrs": {"level": 3},
@@ -23,7 +34,7 @@ def _heading(text: str) -> dict[str, Any]:
     }
 
 
-def _timestamp_label(value: Any) -> str:
+def _timestamp_label(value: object) -> str:
     if not isinstance(value, int) or isinstance(value, bool):
         return "time unavailable"
     seconds = value // 1000
@@ -51,10 +62,10 @@ def _jira_error_details(response: httpx.Response) -> str:
 class JiraClient:
     async def create_issue(
         self,
-        task: dict[str, Any],
+        task: TaskPayload | PersistedTaskPayload,
         meeting_url: str | None,
         *,
-        screen_frames: list[dict[str, Any]] | None = None,
+        screen_frames: list[JiraScreenFrame] | None = None,
     ) -> str:
         required = {
             "JIRA_BASE_URL": settings.jira_base_url,
@@ -70,7 +81,7 @@ class JiraClient:
         owner_speaker = validated_owner_speaker(
             task.get("owner_speaker"), owner_quote or ""
         )
-        content = [
+        content: list[JiraBlock] = [
             _heading("Context"),
             _paragraph(task.get("description") or task["summary"]),
             _paragraph(f"Meeting: {meeting_url or 'Unknown'}"),
@@ -121,11 +132,12 @@ class JiraClient:
                     ],
                 ]
             )
-        fields: dict[str, Any] = {
+        document: JiraDocument = {"type": "doc", "version": 1, "content": content}
+        fields: JiraIssueFields = {
             "project": {"key": settings.jira_project_key},
             "summary": task["summary"],
             "issuetype": {"name": settings.jira_issue_type},
-            "description": {"type": "doc", "version": 1, "content": content},
+            "description": document,
         }
         account_id = settings.jira_speaker_account_ids.get(owner_speaker or "")
         if account_id:
@@ -133,8 +145,9 @@ class JiraClient:
         mapped_priority = settings.jira_priority_map.get(task.get("priority") or "")
         if mapped_priority:
             fields["priority"] = {"name": mapped_priority}
-        if task.get("due_date"):
-            fields["duedate"] = task["due_date"]
+        due_date = task.get("due_date")
+        if due_date:
+            fields["duedate"] = due_date
         async with httpx.AsyncClient(
             auth=(settings.jira_email, settings.jira_api_token),
             headers={"Accept": "application/json"},

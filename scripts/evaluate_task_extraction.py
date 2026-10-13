@@ -4,11 +4,54 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 from app.config import settings
 from app.integrations.task_extraction import extract_tasks
 from app.integrations.transcript import normalize_segments
+from app.schemas import TaskProposal
+
+
+class ExpectedTask(TypedDict):
+    id: str
+    summary: str
+    evidence_segment_id: str
+    evidence_quote: str
+    owner_speaker: str
+    owner_evidence_segment_id: str
+    owner_evidence_quote: str
+    actual_owner: str
+
+
+class ScoreDetail(TypedDict):
+    matched_gold_task: str | None
+    source_segment_id: str | None
+    summary: str
+    owner_speaker: str | None
+    canonical_owner: str | None
+    confidence: float
+    duplicate: bool
+
+
+class TaskScore(TypedDict):
+    target_owner: str
+    gold_tasks: int
+    in_scope_proposals: int
+    out_of_scope_proposals_ignored: int
+    true_positives: int
+    false_positives: int
+    false_negatives: int
+    duplicate_predictions: int
+    task_precision: float
+    task_recall: float
+    task_f1: float
+    correctly_assigned_to_target: int
+    owner_mismatches_on_matched_tasks: int
+    target_assignment_precision: float
+    target_assignment_recall: float
+    false_target_assignments: int
+    details: list[ScoreDetail]
+
 
 DEFAULT_FIXTURE = (
     Path(__file__).resolve().parents[1]
@@ -25,17 +68,21 @@ def _canonical_owner(owner: str | None) -> str | None:
 
 
 def _score(
-    proposals: list[Any],
-    expected_tasks: list[dict[str, Any]],
+    proposals: list[TaskProposal],
+    expected_tasks: list[ExpectedTask],
     segment_by_timestamp: dict[int, str],
     scope_owner: str,
-) -> dict[str, Any]:
+) -> TaskScore:
     target_owner = _canonical_owner(scope_owner) or scope_owner
     expected_by_segment = {task["evidence_segment_id"]: task for task in expected_tasks}
-    in_scope_proposals: list[tuple[Any, str | None, dict[str, Any] | None]] = []
+    in_scope_proposals: list[tuple[TaskProposal, str | None, ExpectedTask | None]] = []
     out_of_scope_proposals = 0
     for proposal in proposals:
-        segment_id = segment_by_timestamp.get(proposal.timestamp_ms)
+        segment_id = (
+            segment_by_timestamp.get(proposal.timestamp_ms)
+            if proposal.timestamp_ms is not None
+            else None
+        )
         expected = expected_by_segment.get(segment_id or "")
         if (
             expected is not None
@@ -54,7 +101,7 @@ def _score(
     false_target_assignments = 0
     target_assignment_predictions = 0
     correctly_assigned = 0
-    details: list[dict[str, Any]] = []
+    details: list[ScoreDetail] = []
 
     for proposal, segment_id, expected in in_scope_proposals:
         predicted_owner = _canonical_owner(proposal.owner_speaker)
@@ -137,11 +184,16 @@ def _score(
 async def _evaluate(fixture_path: Path) -> None:
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     segments = normalize_segments(fixture["segments"])
-    timestamp_to_segment = {
-        int(segment["timestamp_ms"]): str(segment["id"])
-        for segment in segments
-        if segment.get("timestamp_ms") is not None and segment.get("id")
-    }
+    timestamp_to_segment: dict[int, str] = {}
+    for segment in segments:
+        timestamp = segment["timestamp_ms"]
+        segment_id = segment["id"]
+        if (
+            isinstance(timestamp, int | str | float)
+            and not isinstance(timestamp, bool)
+            and segment_id is not None
+        ):
+            timestamp_to_segment[int(timestamp)] = str(segment_id)
 
     extraction = await extract_tasks(segments)
     scope_owner = fixture["scope_owner"]

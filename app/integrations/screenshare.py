@@ -3,19 +3,21 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from typing import Any, cast
+from collections.abc import Iterable
+from typing import cast
 
 import httpx
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessageParam
 
 from app import db
 from app.config import settings
-from app.schemas import TaskProposal, TaskVisualEvidence
+from app.schemas import ScreenFrameRecord, TaskProposal, TaskVisualEvidence
 
 logger = logging.getLogger("jira-bot.screenshare")
 
 
-async def summarize_screen_frame(client: AsyncOpenAI, frame: dict[str, Any]) -> str:
+async def summarize_screen_frame(client: AsyncOpenAI, frame: ScreenFrameRecord) -> str:
     cached = frame.get("summary")
     if isinstance(cached, str) and cached.strip():
         return cached.strip()
@@ -23,7 +25,7 @@ async def summarize_screen_frame(client: AsyncOpenAI, frame: dict[str, Any]) -> 
         return ""
 
     encoded_image = base64.b64encode(frame["frame_data"]).decode("ascii")
-    messages: list[dict[str, Any]] = [
+    messages = [
         {
             "role": "system",
             "content": (
@@ -53,7 +55,7 @@ async def summarize_screen_frame(client: AsyncOpenAI, frame: dict[str, Any]) -> 
         model=settings.llm_model,
         temperature=0,
         response_format={"type": "json_object"},
-        messages=cast(Any, messages),
+        messages=cast(Iterable[ChatCompletionMessageParam], messages),
         max_tokens=256,
     )
     content = response.choices[0].message.content or "{}"
@@ -75,7 +77,7 @@ async def add_screenshare_context(
 ) -> list[TaskProposal]:
     if not settings.screenshare_capture_enabled:
         return tasks
-    candidate_frames: dict[int, dict[str, Any]] = {}
+    candidate_frames: dict[int, ScreenFrameRecord] = {}
     for task in tasks:
         if task.timestamp_ms is None:
             continue
@@ -89,11 +91,11 @@ async def add_screenshare_context(
     if not candidate_frames:
         return tasks
 
-    summaries = {
-        frame_id: frame["summary"].strip()
-        for frame_id, frame in candidate_frames.items()
-        if isinstance(frame.get("summary"), str) and frame["summary"].strip()
-    }
+    summaries: dict[int, str] = {}
+    for frame_id, frame in candidate_frames.items():
+        summary = frame["summary"]
+        if isinstance(summary, str) and summary.strip():
+            summaries[frame_id] = summary.strip()
     missing_summaries = [
         frame
         for frame_id, frame in candidate_frames.items()

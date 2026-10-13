@@ -9,7 +9,7 @@ import time as monotonic_time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
-from typing import Any, Protocol
+from typing import Literal, Protocol
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -17,7 +17,9 @@ import httpx
 
 from app import db
 from app.config import settings
+from app.integrations.attendee import AttendeeCalendarClient
 from app.integrations.google_calendar import GoogleCalendarClient
+from app.schemas import CalendarEvent, CalendarSyncChange, CalendarWatchResponse
 
 logger = logging.getLogger("jira-bot.calendar")
 _SYNC_WAKEUP: asyncio.Event | None = None
@@ -59,7 +61,7 @@ class CalendarWatchClient(Protocol):
         callback_url: str,
         channel_token: str,
         expiration_ms: int,
-    ) -> dict[str, Any]: ...
+    ) -> CalendarWatchResponse: ...
 
     async def stop_watching(self, channel_id: str, resource_id: str) -> None: ...
 
@@ -67,7 +69,7 @@ class CalendarWatchClient(Protocol):
 class CalendarSyncClient(Protocol):
     async def sync_events(
         self, sync_token: str | None
-    ) -> tuple[list[dict[str, Any]], str]: ...
+    ) -> tuple[list[CalendarEvent], str]: ...
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,9 @@ class ScheduledMeet:
     event_end: str | None = None
 
 
-def _parse_event_datetime(event: dict[str, Any], key: str) -> datetime | None:
+def _parse_event_datetime(
+    event: CalendarEvent, key: Literal["start", "end"]
+) -> datetime | None:
     value = event.get(key)
     if not isinstance(value, dict) or not isinstance(value.get("dateTime"), str):
         return None
@@ -96,15 +100,15 @@ def _parse_event_datetime(event: dict[str, Any], key: str) -> datetime | None:
         return None
 
 
-def _parse_event_start(event: dict[str, Any]) -> datetime | None:
+def _parse_event_start(event: CalendarEvent) -> datetime | None:
     return _parse_event_datetime(event, "start")
 
 
-def _parse_event_end(event: dict[str, Any]) -> datetime | None:
+def _parse_event_end(event: CalendarEvent) -> datetime | None:
     return _parse_event_datetime(event, "end")
 
 
-def _meet_url(event: dict[str, Any]) -> str | None:
+def _meet_url(event: CalendarEvent) -> str | None:
     candidates: list[str] = []
     hangout_link = event.get("hangoutLink")
     if isinstance(hangout_link, str):
@@ -133,7 +137,7 @@ def _meet_url(event: dict[str, Any]) -> str | None:
     return None
 
 
-def _event_key(event: dict[str, Any], start: datetime | None) -> tuple[str, str] | None:
+def _event_key(event: CalendarEvent, start: datetime | None) -> tuple[str, str] | None:
     event_id = event.get("id")
     if not isinstance(event_id, str) or not event_id:
         return None
@@ -159,7 +163,7 @@ def _event_key(event: dict[str, Any], start: datetime | None) -> tuple[str, str]
     return hashlib.sha256(key_material.encode("utf-8")).hexdigest(), event_id
 
 
-def calendar_meet(event: dict[str, Any]) -> ScheduledMeet | None:
+def calendar_meet(event: CalendarEvent) -> ScheduledMeet | None:
     if event.get("status") == "cancelled":
         return None
     title = event.get("summary")
@@ -214,7 +218,7 @@ def _is_due(candidate: ScheduledMeet, now: datetime) -> bool:
 
 
 def scheduled_meet(
-    event: dict[str, Any], now: datetime | None = None
+    event: CalendarEvent, now: datetime | None = None
 ) -> ScheduledMeet | None:
     candidate = calendar_meet(event)
     if candidate is None or not _is_due(candidate, now or datetime.now(UTC)):
@@ -223,7 +227,7 @@ def scheduled_meet(
 
 
 async def _request_candidates(
-    candidates: list[ScheduledMeet], attendee_client: Any
+    candidates: list[ScheduledMeet], attendee_client: AttendeeCalendarClient
 ) -> int:
     requested = 0
     for candidate in candidates:
@@ -267,7 +271,9 @@ async def _request_candidates(
 
 
 async def request_due_meetings(
-    events: list[dict[str, Any]], attendee_client: Any, now: datetime | None = None
+    events: list[CalendarEvent],
+    attendee_client: AttendeeCalendarClient,
+    now: datetime | None = None,
 ) -> int:
     current = now or datetime.now(UTC)
     candidates = [
@@ -279,7 +285,7 @@ async def request_due_meetings(
 
 
 async def request_stored_due_meetings(
-    attendee_client: Any, now: datetime | None = None
+    attendee_client: AttendeeCalendarClient, now: datetime | None = None
 ) -> int:
     current = now or datetime.now(UTC)
     time_min = (
@@ -354,6 +360,8 @@ async def _ensure_calendar_watch(calendar: CalendarWatchClient) -> bool:
         logger.error("Google Calendar watch response omitted resourceId")
         return current is not None and int(current["expiration_ms"]) > now_ms
     try:
+        if not isinstance(expiration, str | int | float):
+            raise TypeError
         expiration_ms = int(expiration)
     except TypeError, ValueError:
         expiration_ms = requested_expiration
@@ -375,8 +383,8 @@ async def _ensure_calendar_watch(calendar: CalendarWatchClient) -> bool:
 
 
 def _calendar_sync_change(
-    event: dict[str, Any], *, full_sync: bool
-) -> dict[str, Any] | None:
+    event: CalendarEvent, *, full_sync: bool
+) -> CalendarSyncChange | None:
     identity = _event_key(event, _parse_event_start(event))
     if identity is None:
         return None
@@ -420,7 +428,7 @@ async def sync_calendar_events(calendar: CalendarSyncClient) -> int:
 
 
 async def run_calendar_auto_join(
-    attendee_client: Any, sync_wakeup: asyncio.Event
+    attendee_client: AttendeeCalendarClient, sync_wakeup: asyncio.Event
 ) -> None:
     if not settings.google_calendar_auto_join_enabled:
         return

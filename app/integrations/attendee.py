@@ -5,12 +5,30 @@ import binascii
 import hashlib
 import hmac
 import json
-from typing import Any
+from typing import Protocol
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
-
 import httpx
 
 from app.config import settings
+from app.schemas import (
+    AttendeeBotResponse,
+    AttendeeBotSettings,
+    AttendeeTranscriptionSettings,
+    ChatMessage,
+    CreatedAttendeeBot,
+    JSONValue,
+    JSONObject,
+)
+
+
+class AttendeeCalendarClient(Protocol):
+    async def create_bot(self, meeting_url: str) -> CreatedAttendeeBot: ...
+
+
+class AttendeeLifecycleClient(Protocol):
+    async def leave_bot(self, bot_id: str) -> JSONValue: ...
+
+    async def get_bot(self, bot_id: str) -> AttendeeBotResponse: ...
 
 
 class AttendeeClient:
@@ -26,7 +44,7 @@ class AttendeeClient:
         meeting_url: str,
         *,
         screen_share_capture: bool | None = None,
-    ) -> dict[str, Any]:
+    ) -> CreatedAttendeeBot:
         capture_screen_share = (
             settings.screenshare_capture_enabled
             if screen_share_capture is None
@@ -57,7 +75,7 @@ class AttendeeClient:
             )
         if not settings.mlx_transcriber_api_key:
             raise RuntimeError("MLX_TRANSCRIBER_API_KEY is not configured")
-        transcription_settings: dict[str, Any] = {
+        transcription_settings: AttendeeTranscriptionSettings = {
             "custom_async_v2": {
                 "headers": {
                     "Authorization": f"Bearer {settings.mlx_transcriber_api_key}"
@@ -68,7 +86,7 @@ class AttendeeClient:
             transcription_settings["custom_async_v2"]["form_data"] = {
                 "language": settings.mlx_whisper_language
             }
-        bot_settings: dict[str, Any] = {
+        bot_settings: AttendeeBotSettings = {
             "meeting_url": meeting_url,
             "bot_name": settings.attendee_bot_name,
             "transcription_settings": transcription_settings,
@@ -103,22 +121,28 @@ class AttendeeClient:
             }
         response = await self.client.post("bots", json=bot_settings)
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("id"), str):
+            raise ValueError("Attendee returned an invalid bot creation response")
+        state = payload.get("state")
+        if state is not None and not isinstance(state, str):
+            raise ValueError("Attendee returned an invalid bot state")
+        return CreatedAttendeeBot(**payload)
 
-    async def leave_bot(self, bot_id: str) -> dict[str, Any]:
+    async def leave_bot(self, bot_id: str) -> JSONValue:
         response = await self.client.post(f"bots/{bot_id}/leave")
         response.raise_for_status()
         return response.json() if response.content else {"ok": True}
 
-    async def get_bot(self, bot_id: str) -> dict[str, Any]:
+    async def get_bot(self, bot_id: str) -> AttendeeBotResponse:
         response = await self.client.get(f"bots/{bot_id}")
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Attendee returned an invalid bot response")
-        return payload
+        return AttendeeBotResponse(**payload)
 
-    async def get_transcript(self, bot_id: str) -> Any:
+    async def get_transcript(self, bot_id: str) -> JSONValue:
         response = await self.client.get(
             f"bots/{bot_id}/transcript",
             timeout=httpx.Timeout(300, connect=15, write=60, pool=15),
@@ -126,8 +150,8 @@ class AttendeeClient:
         response.raise_for_status()
         return response.json()
 
-    async def get_chat_messages(self, bot_id: str) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = []
+    async def get_chat_messages(self, bot_id: str) -> list[ChatMessage]:
+        messages: list[ChatMessage] = []
         cursor: str | None = None
         seen_cursors: set[str] = set()
         while True:
@@ -193,7 +217,7 @@ class AttendeeClient:
         await self.client.aclose()
 
 
-def verify_attendee_signature(payload: dict[str, Any], signature: str | None) -> bool:
+def verify_attendee_signature(payload: JSONObject, signature: str | None) -> bool:
     if not signature or not settings.attendee_webhook_secret:
         return False
     try:

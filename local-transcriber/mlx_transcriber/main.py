@@ -7,7 +7,7 @@ import shutil
 import tempfile
 import threading
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Literal, TypedDict
 
 import mlx_whisper
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -18,30 +18,107 @@ app = FastAPI(title="Local MLX Whisper Transcriber")
 _transcription_lock = threading.Lock()
 
 
+class WhisperWord(TypedDict, total=False):
+    word: object
+    start: object
+    end: object
+
+
+class WhisperSegment(TypedDict):
+    words: list[WhisperWord]
+    text: object
+    start: object
+    end: object
+
+
+class TranscriptionWord(TypedDict):
+    word: str
+    start: float
+    end: float
+
+
+class TranscriptionUtterance(TypedDict):
+    words: list[TranscriptionWord]
+
+
+class TranscriptionContent(TypedDict):
+    full_transcript: str
+    utterances: list[TranscriptionUtterance]
+
+
+class TranscriptionResult(TypedDict):
+    transcription: TranscriptionContent
+
+
+class TranscriptionResponse(TypedDict):
+    status: Literal["done"]
+    result: TranscriptionResult
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def _format_utterances(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    utterances: list[dict[str, Any]] = []
-    for segment in segments:
-        words = segment.get("words") or []
-        formatted_words = [
+def _normalize_whisper_segments(value: object) -> list[WhisperSegment]:
+    if not isinstance(value, list):
+        return []
+    segments: list[WhisperSegment] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise RuntimeError("MLX Whisper returned an invalid segment")
+        raw_words = item.get("words")
+        words: list[WhisperWord] = []
+        if isinstance(raw_words, list):
+            for word in raw_words:
+                if isinstance(word, dict):
+                    words.append(
+                        {
+                            "word": word.get("word", ""),
+                            "start": word.get("start", 0.0),
+                            "end": word.get("end", 0.0),
+                        }
+                    )
+        segments.append(
             {
-                "word": str(word.get("word", "")),
-                "start": float(word.get("start", 0.0)),
-                "end": float(word.get("end", 0.0)),
+                "words": words,
+                "text": item.get("text", ""),
+                "start": item.get("start", 0.0),
+                "end": item.get("end", 0.0),
             }
-            for word in words
-            if isinstance(word, dict) and str(word.get("word", "")).strip()
-        ]
+        )
+    return segments
+
+
+def _as_float(value: object) -> float:
+    if not isinstance(value, str | int | float):
+        raise TypeError("MLX Whisper returned a nonnumeric timestamp")
+    return float(value)
+
+
+def _format_utterances(
+    segments: list[WhisperSegment],
+) -> list[TranscriptionUtterance]:
+    utterances: list[TranscriptionUtterance] = []
+    for segment in segments:
+        formatted_words: list[TranscriptionWord] = []
+        for word in segment["words"]:
+            word_text = str(word.get("word", ""))
+            if not word_text.strip():
+                continue
+            formatted_words.append(
+                {
+                    "word": word_text,
+                    "start": _as_float(word.get("start", 0.0)),
+                    "end": _as_float(word.get("end", 0.0)),
+                }
+            )
         if not formatted_words and str(segment.get("text", "")).strip():
             formatted_words.append(
                 {
                     "word": str(segment["text"]),
-                    "start": float(segment.get("start", 0.0)),
-                    "end": float(segment.get("end", 0.0)),
+                    "start": _as_float(segment.get("start", 0.0)),
+                    "end": _as_float(segment.get("end", 0.0)),
                 }
             )
         if formatted_words:
@@ -54,7 +131,7 @@ def transcribe(
     audio: Annotated[UploadFile, File()],
     language: Annotated[str | None, Form()] = None,
     authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, Any] | JSONResponse:
+) -> TranscriptionResponse | JSONResponse:
     try:
         expected_token = os.getenv("MLX_TRANSCRIBER_API_KEY", "")
         if not expected_token:
@@ -76,7 +153,7 @@ def transcribe(
                 raise HTTPException(status_code=422, detail="Audio upload is empty")
 
             with _transcription_lock:
-                result = mlx_whisper.transcribe(
+                result: object = mlx_whisper.transcribe(
                     str(audio_path),
                     path_or_hf_repo=model,
                     word_timestamps=True,
@@ -94,8 +171,12 @@ def transcribe(
     finally:
         audio.file.close()
 
-    # mlx-whisper does not annotate its return value; transcribe() returns segment dictionaries.
-    segments = cast(list[dict[str, Any]], result.get("segments", []))
+    if not isinstance(result, dict):
+        raise RuntimeError("MLX Whisper returned an invalid transcription result")
+    raw_segments = result.get("segments", [])
+    if not isinstance(raw_segments, list):
+        raise RuntimeError("MLX Whisper returned an invalid segment list")
+    segments = _normalize_whisper_segments(raw_segments)
     return {
         "status": "done",
         "result": {

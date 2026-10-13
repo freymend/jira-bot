@@ -8,10 +8,9 @@ import hmac
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from urllib.parse import urlparse, urlsplit
 
 from fastapi import (
@@ -38,7 +37,18 @@ from app.integrations.google_calendar import GoogleCalendarClient
 from app.integrations.transcript import normalize_segments
 from app.meeting_lifecycle import run_meeting_leave_monitor
 from app.pipeline import attendee
-from app.schemas import MeetingStartRequest
+from app.schemas import (
+    CalendarAutoJoinStatus,
+    CalendarEventRow,
+    DashboardOverview,
+    DashboardCalendarEvent,
+    DashboardService,
+    JSONValue,
+    JSONObject,
+    MeetingRecord,
+    MeetingStartRequest,
+    MeetingStartResponse,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jira-bot")
@@ -122,7 +132,7 @@ async def _probe_service(
     return "healthy" if response.is_success else "unavailable"
 
 
-_DASHBOARD_CALENDAR_CACHE: tuple[str, float, list[dict[str, Any]]] | None = None
+_DASHBOARD_CALENDAR_CACHE: tuple[str, float, list[DashboardCalendarEvent]] | None = None
 
 
 def _calendar_cache_key() -> str:
@@ -138,12 +148,14 @@ def _calendar_cache_key() -> str:
     )
 
 
-def _calendar_event_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _calendar_event_rows(
+    rows: Sequence[CalendarEventRow],
+) -> list[DashboardCalendarEvent]:
     attempts = {
         (str(item["calendar_event_id"]), str(item["event_start"])): item
         for item in db.list_calendar_auto_joins(limit=100)
     }
-    result: list[dict[str, Any]] = []
+    result: list[DashboardCalendarEvent] = []
     for event in rows:
         attempt = attempts.get(
             (str(event["calendar_event_id"]), str(event["event_start"])), {}
@@ -165,7 +177,7 @@ def _calendar_event_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 async def _dashboard_calendar_schedule(
     now: datetime,
-) -> tuple[list[dict[str, Any]], str, str | None]:
+) -> tuple[list[DashboardCalendarEvent], str, str | None]:
     global _DASHBOARD_CALENDAR_CACHE
     if not settings.google_calendar_auto_join_enabled:
         return [], "disabled", None
@@ -199,7 +211,7 @@ async def _dashboard_calendar_schedule(
             for event in events
             if (candidate := calendar_meet(event)) is not None
         ]
-        rows = [
+        rows: list[CalendarEventRow] = [
             {
                 "calendar_event_id": candidate.event_id,
                 "event_start": candidate.event_start,
@@ -231,7 +243,7 @@ async def _dashboard_calendar_schedule(
 
 
 @app.get("/dashboard/api/overview", dependencies=[Depends(require_app_auth)])
-async def dashboard_overview(limit: int = 25) -> dict[str, Any]:
+async def dashboard_overview(limit: int = 25) -> DashboardOverview:
     local_checks = db.health_checks()
     attendee_parts = urlsplit(settings.attendee_api_base)
     attendee_health_url = (
@@ -256,7 +268,7 @@ async def dashboard_overview(limit: int = 25) -> dict[str, Any]:
             _probe_service(client, settings.mlx_transcriber_health_url),
         )
 
-    services = [
+    services: list[DashboardService] = [
         {"name": "API", "status": "healthy"},
         {
             "name": "Database",
@@ -343,7 +355,7 @@ async def google_calendar_webhook(request: Request) -> Response:
 
 
 @app.get("/calendar/auto-join", dependencies=[Depends(require_app_auth)])
-async def calendar_auto_join_status(limit: int = 20) -> dict[str, Any]:
+async def calendar_auto_join_status(limit: int = 20) -> CalendarAutoJoinStatus:
     watch = db.get_current_calendar_watch(settings.google_calendar_id)
     push_is_active = watch is not None and int(watch["expiration_ms"]) > int(
         datetime.now(UTC).timestamp() * 1000
@@ -364,7 +376,7 @@ async def calendar_auto_join_status(limit: int = 20) -> dict[str, Any]:
 
 
 @app.post("/meetings", dependencies=[Depends(require_app_auth)])
-async def start_meeting(body: MeetingStartRequest) -> dict[str, Any]:
+async def start_meeting(body: MeetingStartRequest) -> MeetingStartResponse:
     parsed = urlparse(str(body.meeting_url))
     if parsed.hostname not in {"meet.google.com", "www.meet.google.com"}:
         raise HTTPException(
@@ -398,13 +410,13 @@ async def start_meeting(body: MeetingStartRequest) -> dict[str, Any]:
     return {
         "bot_id": bot_id,
         "state": bot.get("state"),
-        "meeting_url": body.meeting_url,
+        "meeting_url": str(body.meeting_url),
         "screenshare_capture_enabled": screen_share_capture,
     }
 
 
 @app.post("/meetings/{bot_id}/leave", dependencies=[Depends(require_app_auth)])
-async def leave_meeting(bot_id: str) -> dict[str, Any]:
+async def leave_meeting(bot_id: str) -> JSONValue:
     claimed = db.claim_meeting_leave(bot_id, "manual", require_recording=False)
     if not claimed:
         meeting = db.get_meeting(bot_id)
@@ -427,7 +439,7 @@ async def leave_meeting(bot_id: str) -> dict[str, Any]:
 
 
 @app.get("/meetings/{bot_id}", dependencies=[Depends(require_app_auth)])
-async def meeting_status(bot_id: str) -> dict[str, Any]:
+async def meeting_status(bot_id: str) -> MeetingRecord:
     meeting = db.get_meeting(bot_id)
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
@@ -459,7 +471,7 @@ async def reprocess_meeting(bot_id: str) -> dict[str, str]:
     return {"bot_id": bot_id, "status": status}
 
 
-def _timestamp_ms(value: Any) -> int | None:
+def _timestamp_ms(value: object) -> int | None:
     if not isinstance(value, str):
         return None
     try:
@@ -471,7 +483,7 @@ def _timestamp_ms(value: Any) -> int | None:
     return int(parsed.timestamp() * 1000)
 
 
-def _event_is_final(payload: dict[str, Any]) -> bool:
+def _event_is_final(payload: JSONObject) -> bool:
     if payload.get("trigger") != "bot.state_change":
         return False
     data = payload.get("data") or {}
