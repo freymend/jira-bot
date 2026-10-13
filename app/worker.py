@@ -20,10 +20,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jira-bot.worker")
 
 
+async def _wait_for_poll(stop: asyncio.Event) -> None:
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=POLL_INTERVAL_SECONDS)
+    except TimeoutError:
+        pass
+
+
 async def _maintain_lease(job_id: int, worker_id: str) -> None:
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
-        if not db.renew_job_lease(job_id, worker_id, lease_seconds=LEASE_SECONDS):
+        try:
+            renewed = db.renew_job_lease(job_id, worker_id, lease_seconds=LEASE_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Lease renewal failed for background job %s", job_id)
+            continue
+        if not renewed:
             logger.error("Lost lease for background job %s", job_id)
             return
 
@@ -82,18 +96,22 @@ async def run_worker() -> None:
 
     logger.info("Background worker %s started", worker_id)
     while not stop.is_set():
-        if time.monotonic() - last_screen_frame_cleanup >= 60:
-            db.delete_expired_screen_frames()
-            last_screen_frame_cleanup = time.monotonic()
-        db.record_worker_heartbeat(worker_id)
-        job = db.claim_next_job(worker_id, lease_seconds=LEASE_SECONDS)
-        if job is not None:
-            await _process_job(job, worker_id)
-            continue
         try:
-            await asyncio.wait_for(stop.wait(), timeout=POLL_INTERVAL_SECONDS)
-        except TimeoutError:
-            pass
+            if time.monotonic() - last_screen_frame_cleanup >= 60:
+                db.delete_expired_screen_frames()
+                last_screen_frame_cleanup = time.monotonic()
+            db.record_worker_heartbeat(worker_id)
+            job = db.claim_next_job(worker_id, lease_seconds=LEASE_SECONDS)
+            if job is not None:
+                await _process_job(job, worker_id)
+                continue
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Worker iteration failed; retrying")
+            await _wait_for_poll(stop)
+            continue
+        await _wait_for_poll(stop)
     logger.info("Background worker %s stopped", worker_id)
 
 

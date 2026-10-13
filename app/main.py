@@ -8,7 +8,7 @@ import hmac
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse, urlsplit
@@ -52,6 +52,22 @@ from app.schemas import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jira-bot")
+_BACKGROUND_TASK_RETRY_SECONDS = 5
+
+
+async def _run_resilient_background_task(
+    name: str, runner: Callable[[], Awaitable[None]]
+) -> None:
+    while True:
+        try:
+            await runner()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Background task %s failed; restarting", name)
+        else:
+            logger.error("Background task %s exited; restarting", name)
+        await asyncio.sleep(_BACKGROUND_TASK_RETRY_SECONDS)
 
 
 @asynccontextmanager
@@ -63,14 +79,21 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         calendar_sync_wakeup = asyncio.Event()
         background_tasks.append(
             asyncio.create_task(
-                run_calendar_auto_join(attendee, calendar_sync_wakeup),
+                _run_resilient_background_task(
+                    "google-calendar-auto-join",
+                    lambda: run_calendar_auto_join(attendee, calendar_sync_wakeup),
+                ),
                 name="google-calendar-auto-join",
             )
         )
     if settings.meeting_auto_leave_enabled:
         background_tasks.append(
             asyncio.create_task(
-                run_meeting_leave_monitor(attendee), name="meeting-auto-leave"
+                _run_resilient_background_task(
+                    "meeting-auto-leave",
+                    lambda: run_meeting_leave_monitor(attendee),
+                ),
+                name="meeting-auto-leave",
             )
         )
     try:
