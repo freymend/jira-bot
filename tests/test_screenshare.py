@@ -20,7 +20,7 @@ from app.integrations.attendee import AttendeeClient
 from app.integrations.jira import JiraClient
 from app.integrations.screenshare import add_screenshare_context, summarize_screen_frame
 from app.main import app
-from app.schemas import TaskProposal
+from app.schemas import TaskPayload, TaskProposal
 
 
 class ScreenShareStorageTests(unittest.TestCase):
@@ -477,7 +477,7 @@ class JiraScreenShareEvidenceTests(unittest.IsolatedAsyncioTestCase):
             jira_project_key="TEST",
             jira_attach_screenshare_evidence=True,
         )
-        task = {
+        task: TaskPayload = {
             "summary": "Update checkout page",
             "evidence_quote": "I will update the checkout page.",
             "timestamp_ms": 15_000,
@@ -534,7 +534,7 @@ class JiraScreenShareEvidenceTests(unittest.IsolatedAsyncioTestCase):
             jira_api_token="jira-token",
             jira_project_key="TEST",
         )
-        task = {
+        task: TaskPayload = {
             "summary": "Update checkout page",
             "evidence_quote": "I will update the checkout page.",
         }

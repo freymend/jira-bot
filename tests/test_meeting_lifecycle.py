@@ -19,7 +19,13 @@ from app.meeting_lifecycle import (
     check_stale_leave_requests,
     transcript_indicates_wrap_up,
 )
-from app.schemas import AttendeeBotResponse, JSONValue
+from app.schemas import (
+    AttendeeBotResponse,
+    JSONValue,
+    MeetingRecord,
+    RecentTranscriptSegment,
+    TranscriptSegment,
+)
 
 
 class FakeAttendee:
@@ -40,6 +46,25 @@ class FakeAttendee:
         if self.fail:
             raise RuntimeError("leave outcome unknown")
         return {"ok": True}
+
+
+def _transcript_segment(
+    segment_id: str, timestamp_ms: int, text: str
+) -> TranscriptSegment:
+    return {
+        "id": segment_id,
+        "timestamp_ms": timestamp_ms,
+        "duration_ms": 0,
+        "speaker_name": "Alex",
+        "speaker_uuid": None,
+        "text": text,
+        "raw": {
+            "id": segment_id,
+            "timestamp_ms": timestamp_ms,
+            "speaker_name": "Alex",
+            "text": text,
+        },
+    }
 
 
 class MeetingLeaveTests(unittest.IsolatedAsyncioTestCase):
@@ -73,7 +98,7 @@ class MeetingLeaveTests(unittest.IsolatedAsyncioTestCase):
         *,
         scheduled_end_at: str | None = None,
         participant_tracking_enabled: bool = False,
-    ) -> dict[str, object]:
+    ) -> MeetingRecord:
         db.create_meeting(
             bot_id,
             "https://meet.google.com/abc-defg-hij",
@@ -84,19 +109,16 @@ class MeetingLeaveTests(unittest.IsolatedAsyncioTestCase):
         db.save_segments(
             bot_id,
             [
-                {
-                    "id": "segment-1",
-                    "timestamp_ms": 1000,
-                    "speaker_name": "Alex",
-                    "text": "We should review the launch plan.",
-                }
+                _transcript_segment(
+                    "segment-1", 1000, "We should review the launch plan."
+                )
             ],
         )
         meeting = db.get_meeting(bot_id)
         assert meeting is not None
         return meeting
 
-    def _quiet_time(self, meeting: dict[str, object], seconds: int = 90) -> datetime:
+    def _quiet_time(self, meeting: MeetingRecord, seconds: int = 90) -> datetime:
         activity_at = meeting["last_transcript_received_at"]
         assert isinstance(activity_at, str)
         return datetime.fromisoformat(activity_at) + timedelta(seconds=seconds)
@@ -144,12 +166,9 @@ class MeetingLeaveTests(unittest.IsolatedAsyncioTestCase):
             db.save_segments(
                 "bot-1",
                 [
-                    {
-                        "id": "segment-2",
-                        "timestamp_ms": 2000,
-                        "speaker_name": "Alex",
-                        "text": "That covers everything. Thanks, everyone.",
-                    }
+                    _transcript_segment(
+                        "segment-2", 2000, "That covers everything. Thanks, everyone."
+                    )
                 ],
             )
             updated = db.get_meeting("bot-1")
@@ -490,12 +509,9 @@ class MeetingLeaveTests(unittest.IsolatedAsyncioTestCase):
         db.save_segments(
             "bot-1",
             [
-                {
-                    "id": "segment-1",
-                    "timestamp_ms": 1000,
-                    "speaker_name": "Alex",
-                    "text": "We should review the launch plan.",
-                }
+                _transcript_segment(
+                    "segment-1", 1000, "We should review the launch plan."
+                )
             ],
         )
         after = db.get_meeting("bot-1")
@@ -544,7 +560,13 @@ class MeetingLeaveTests(unittest.IsolatedAsyncioTestCase):
             chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
             close=AsyncMock(),
         )
-        segments = [{"speaker_name": "Alex", "text": "Thanks, that is all for today."}]
+        segments: list[RecentTranscriptSegment] = [
+            {
+                "timestamp_ms": 0,
+                "speaker_name": "Alex",
+                "text": "Thanks, that is all for today.",
+            }
+        ]
 
         with patch("app.meeting_lifecycle.AsyncOpenAI", return_value=client) as factory:
             self.assertTrue(

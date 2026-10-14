@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app import db
 from app.config import settings
+from app.schemas import JSONObject
 from app.main import app
 
 
@@ -159,7 +160,7 @@ class DurableJobTests(unittest.TestCase):
             )
 
     def test_final_webhook_queues_once_and_expired_lease_is_reclaimed(self) -> None:
-        payload = {"trigger": "bot.state_change", "bot_id": "bot-1"}
+        payload: JSONObject = {"trigger": "bot.state_change", "bot_id": "bot-1"}
         self.assertTrue(
             db.record_webhook(
                 "event-1",

@@ -13,6 +13,7 @@ import httpx
 from app import db
 from app.config import settings
 from app.integrations.task_extraction import extract_tasks
+from app.schemas import TranscriptSegment
 
 
 def _response(content: str) -> SimpleNamespace:
@@ -47,18 +48,24 @@ class TaskExtractionResilienceTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_chunk_and_context_results_survive_interruption(
         self,
     ) -> None:
-        segments = [
+        segments: list[TranscriptSegment] = [
             {
                 "id": "s1",
                 "timestamp_ms": 1000,
+                "duration_ms": 0,
                 "speaker_name": "Maya",
+                "speaker_uuid": None,
                 "text": "I'll add a regression test for reconnects.",
+                "raw": {},
             },
             {
                 "id": "s2",
                 "timestamp_ms": 2000,
+                "duration_ms": 0,
                 "speaker_name": "Leo",
+                "speaker_uuid": None,
                 "text": "I'll document the offline recovery steps.",
+                "raw": {},
             },
         ]
         extracted = {

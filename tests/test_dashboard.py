@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, time as datetime_time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
@@ -19,7 +20,9 @@ from app.calendar_scheduler import (
 )
 from app.config import settings
 from app.dashboard import server as dashboard
+from app.integrations.attendee import AttendeeCalendarClient
 from app.main import _dashboard_calendar_schedule, dashboard_overview
+from app.schemas import CalendarEvent
 
 
 class DashboardConfigTests(unittest.TestCase):
@@ -141,7 +144,7 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
         start_day = now.astimezone(timezone).date() + timedelta(days=2)
         event_start = datetime.combine(start_day, datetime_time(10, 0), tzinfo=timezone)
         event_end = event_start + timedelta(minutes=30)
-        raw_event = {
+        raw_event: CalendarEvent = {
             "id": "event-1",
             "summary": "Daily Sync",
             "start": {"dateTime": event_start.isoformat()},
@@ -152,8 +155,9 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
         calendar_client.list_events = AsyncMock(return_value=[raw_event])
         calendar_client.close = AsyncMock()
         configured = self._settings()
-        attendee_client = SimpleNamespace(
-            create_bot=AsyncMock(return_value={"id": "bot-1"})
+        create_bot = AsyncMock(return_value={"id": "bot-1"})
+        attendee_client = cast(
+            AttendeeCalendarClient, SimpleNamespace(create_bot=create_bot)
         )
 
         with (
@@ -184,9 +188,7 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]["event_id"], "event-1")
         self.assertEqual(events[0]["join_status"], "scheduled")
         self.assertEqual(requested, 1)
-        attendee_client.create_bot.assert_awaited_once_with(
-            "https://meet.google.com/abc-defg-hij"
-        )
+        create_bot.assert_awaited_once_with("https://meet.google.com/abc-defg-hij")
         calendar_client.list_events.assert_awaited_once_with(
             now, now + timedelta(days=14)
         )
@@ -203,8 +205,9 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
         }
         watch = {"expiration_ms": int((now + timedelta(days=1)).timestamp() * 1000)}
         configured = self._settings()
-        attendee_client = SimpleNamespace(
-            create_bot=AsyncMock(return_value={"id": "bot-push"})
+        create_bot = AsyncMock(return_value={"id": "bot-push"})
+        attendee_client = cast(
+            AttendeeCalendarClient, SimpleNamespace(create_bot=create_bot)
         )
         with (
             patch("app.main.settings", configured),
@@ -230,7 +233,7 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(error)
         self.assertEqual(events[0]["event_id"], "event-push")
         self.assertEqual(requested, 1)
-        attendee_client.create_bot.assert_awaited_once_with(row["meeting_url"])
+        create_bot.assert_awaited_once_with(row["meeting_url"])
         calendar_client.assert_not_called()
 
     async def test_overview_includes_calendar_events_and_source(self) -> None:

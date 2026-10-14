@@ -8,6 +8,25 @@ from unittest.mock import AsyncMock, patch
 
 from app.config import settings
 from app.integrations import task_extraction
+from app.schemas import MeetingContextSegment, TranscriptSegment
+
+
+def _transcript_segment(
+    timestamp_ms: int,
+    speaker_name: str,
+    text: str,
+    *,
+    segment_id: str | None = None,
+) -> TranscriptSegment:
+    return {
+        "id": segment_id or str(timestamp_ms),
+        "timestamp_ms": timestamp_ms,
+        "duration_ms": 0,
+        "speaker_name": speaker_name,
+        "speaker_uuid": None,
+        "text": text,
+        "raw": {},
+    }
 
 
 def _response(content: str) -> SimpleNamespace:
@@ -30,11 +49,7 @@ def _client(side_effects: list[object]) -> tuple[SimpleNamespace, AsyncMock]:
 class PromptBudgetTests(unittest.IsolatedAsyncioTestCase):
     def test_multilingual_transcript_chunks_respect_the_byte_budget(self) -> None:
         segments = [
-            {
-                "timestamp_ms": index,
-                "speaker_name": "Maya",
-                "text": "中文内容🙂 " * 5000,
-            }
+            _transcript_segment(index, "Maya", "中文内容🙂 " * 5000)
             for index in range(3)
         ]
         chunks = task_extraction._transcript_chunks(segments)
@@ -54,7 +69,7 @@ class PromptBudgetTests(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(len(prompt_text.encode("utf-8")), max_chunk_bytes)
 
     def test_transcript_cache_key_includes_prompt_budget(self) -> None:
-        segments = [{"timestamp_ms": 1000, "speaker_name": "Maya", "text": "hello"}]
+        segments = [_transcript_segment(1000, "Maya", "hello")]
         original_hash = task_extraction._transcript_cache_hash(segments)
         changed_settings = replace(
             settings, llm_context_tokens=settings.llm_context_tokens - 1024
@@ -66,11 +81,11 @@ class PromptBudgetTests(unittest.IsolatedAsyncioTestCase):
 
     def test_context_packet_compacts_multilingual_excerpts_to_budget(self) -> None:
         text = "前置背景。" + "重要任务内容🙂。" * 1500 + "后续说明。"
-        segment = {
-            "id": "s1",
+        segment: MeetingContextSegment = {
             "timestamp_ms": 1000,
             "speaker_name": "Maya",
             "text": text,
+            "source": "transcript",
         }
         task = task_extraction.TaskProposal(
             summary="Document the task",
@@ -91,8 +106,8 @@ class PromptBudgetTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_context_limit_error_splits_transcript_and_retries(self) -> None:
         segments = [
-            {"timestamp_ms": 1000, "speaker_name": "Maya", "text": "First item."},
-            {"timestamp_ms": 2000, "speaker_name": "Leo", "text": "Second item."},
+            _transcript_segment(1000, "Maya", "First item."),
+            _transcript_segment(2000, "Leo", "Second item."),
         ]
         client, create = _client(
             [
@@ -115,12 +130,12 @@ class PromptBudgetTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_context_enrichment_retries_with_a_smaller_packet(self) -> None:
         segments = [
-            {
-                "id": "s1",
-                "timestamp_ms": 1000,
-                "speaker_name": "Maya",
-                "text": "I will document the offline recovery steps. " + "中🙂" * 1000,
-            }
+            _transcript_segment(
+                1000,
+                "Maya",
+                "I will document the offline recovery steps. " + "中🙂" * 1000,
+                segment_id="s1",
+            )
         ]
         extracted = {
             "tasks": [

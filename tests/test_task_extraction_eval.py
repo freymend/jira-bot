@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 from app.integrations.task_extraction import _expand_owner_quote
-from scripts.evaluate_task_extraction import _score
+from app.schemas import TaskProposal
+from scripts.evaluate_task_extraction import ExpectedTask, _score
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "synthetic_daily_sync.json"
 
@@ -77,35 +77,61 @@ class SyntheticTaskExtractionEvalTests(unittest.TestCase):
         )
 
     def test_scorer_limits_metrics_to_target_owner_and_normalizes_alias(self) -> None:
-        expected = [
-            {"id": "first", "evidence_segment_id": "s1", "owner_speaker": "Zachary"},
-            {"id": "second", "evidence_segment_id": "s2", "owner_speaker": "Zachary"},
+        expected: list[ExpectedTask] = [
+            {
+                "id": "first",
+                "summary": "first",
+                "evidence_segment_id": "s1",
+                "evidence_quote": "first evidence",
+                "owner_speaker": "Zachary",
+                "owner_evidence_segment_id": "s1",
+                "owner_evidence_quote": "",
+                "actual_owner": "Zachary",
+            },
+            {
+                "id": "second",
+                "summary": "second",
+                "evidence_segment_id": "s2",
+                "evidence_quote": "second evidence",
+                "owner_speaker": "Zachary",
+                "owner_evidence_segment_id": "s2",
+                "owner_evidence_quote": "",
+                "actual_owner": "Zachary",
+            },
         ]
         proposals = [
-            SimpleNamespace(
-                timestamp_ms=100, summary="first", owner_speaker="Zac", confidence=0.9
+            TaskProposal(
+                timestamp_ms=100,
+                summary="first",
+                evidence_quote="first evidence",
+                owner_speaker="Zac",
+                confidence=0.9,
             ),
-            SimpleNamespace(
+            TaskProposal(
                 timestamp_ms=200,
                 summary="second, owner missing",
+                evidence_quote="second evidence",
                 owner_speaker=None,
                 confidence=0.8,
             ),
-            SimpleNamespace(
+            TaskProposal(
                 timestamp_ms=200,
                 summary="duplicate",
+                evidence_quote="duplicate evidence",
                 owner_speaker="Zachary",
                 confidence=0.7,
             ),
-            SimpleNamespace(
+            TaskProposal(
                 timestamp_ms=300,
                 summary="wrong task assigned to target",
+                evidence_quote="wrong task evidence",
                 owner_speaker="Zachary",
                 confidence=0.6,
             ),
-            SimpleNamespace(
+            TaskProposal(
                 timestamp_ms=400,
                 summary="other person's task",
+                evidence_quote="other task evidence",
                 owner_speaker=None,
                 confidence=0.5,
             ),
