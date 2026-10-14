@@ -75,7 +75,6 @@ async def _run_resilient_background_task(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
-    db.init_db()
     db.delete_expired_screen_frames()
     background_tasks: list[asyncio.Task[None]] = [
         asyncio.create_task(

@@ -27,7 +27,7 @@ class ProcessResilienceTests(unittest.IsolatedAsyncioTestCase):
                 "add_signal_handler",
                 side_effect=lambda _signal, callback: signal_handlers.append(callback),
             ),
-            patch("app.worker.db.init_db"),
+            patch("app.worker.db.init_db") as init_db,
             patch("app.worker.db.delete_expired_screen_frames", return_value=0),
             patch(
                 "app.worker.db.record_worker_heartbeat",
@@ -39,6 +39,7 @@ class ProcessResilienceTests(unittest.IsolatedAsyncioTestCase):
             await worker.run_worker()
 
         heartbeat.assert_called_once()
+        init_db.assert_not_called()
 
     async def test_lease_renewal_retries_after_exception(self) -> None:
         async def no_wait(_delay: float) -> None:

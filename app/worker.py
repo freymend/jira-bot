@@ -85,7 +85,6 @@ async def _process_job(job: BackgroundJob, worker_id: str) -> None:
 
 
 async def run_worker() -> None:
-    db.init_db()
     db.delete_expired_screen_frames()
     last_screen_frame_cleanup = time.monotonic()
     worker_id = os.getenv("WORKER_ID") or f"{socket.gethostname()}:{os.getpid()}"

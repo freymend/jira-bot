@@ -258,7 +258,11 @@ class ScreenShareWebSocketTests(unittest.TestCase):
                 screenshare_sample_interval_seconds=1,
                 screenshare_retention_hours=24,
                 screenshare_max_frames_per_meeting=5,
+                google_calendar_auto_join_enabled=False,
+                meeting_auto_leave_enabled=False,
             )
+            with patch("app.db.settings", app_settings):
+                db.init_db()
             with (
                 patch("app.main.settings", app_settings),
                 patch("app.db.settings", app_settings),
@@ -330,7 +334,11 @@ class ScreenShareWebSocketTests(unittest.TestCase):
                 app_api_token="test-api-token",
                 database_path=str(Path(directory) / "disabled.sqlite3"),
                 screenshare_capture_enabled=False,
+                google_calendar_auto_join_enabled=False,
+                meeting_auto_leave_enabled=False,
             )
+            with patch("app.db.settings", app_settings):
+                db.init_db()
             create_bot = AsyncMock()
             with (
                 patch("app.main.settings", app_settings),
@@ -357,7 +365,11 @@ class ScreenShareWebSocketTests(unittest.TestCase):
                 database_path=str(Path(directory) / "rejected.sqlite3"),
                 screenshare_capture_enabled=True,
                 screenshare_websocket_token="s" * 40,
+                google_calendar_auto_join_enabled=False,
+                meeting_auto_leave_enabled=False,
             )
+            with patch("app.db.settings", app_settings):
+                db.init_db()
             with (
                 patch("app.main.settings", app_settings),
                 patch("app.db.settings", app_settings),

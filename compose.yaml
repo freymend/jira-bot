@@ -58,6 +58,23 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
 
+  migrate:
+    build: .
+    command: ["/app/.venv/bin/python", "-m", "app.migrate"]
+    environment:
+      DATABASE_PATH: /app/data/jira_bot.sqlite3
+    volumes:
+      - jira_bot_data:/app/data
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    cpus: 0.25
+    mem_limit: 256m
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
   api:
     build: .
     init: true
@@ -72,6 +89,8 @@ services:
       LLM_CONTEXT_TOKENS: ${LLM_CONTEXT_TOKENS:-16384}
       LLM_MAX_COMPLETION_TOKENS: ${LLM_MAX_COMPLETION_TOKENS:-2048}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       attendee-app-local:
         condition: service_started
       worker:
@@ -107,6 +126,8 @@ services:
       LLM_CONTEXT_TOKENS: ${LLM_CONTEXT_TOKENS:-16384}
       LLM_MAX_COMPLETION_TOKENS: ${LLM_MAX_COMPLETION_TOKENS:-2048}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       attendee-app-local:
         condition: service_started
     volumes:
