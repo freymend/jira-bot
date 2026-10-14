@@ -35,7 +35,10 @@ from app.config import settings
 from app.integrations.attendee import verify_attendee_signature
 from app.integrations.google_calendar import GoogleCalendarClient
 from app.integrations.transcript import normalize_segments
-from app.meeting_lifecycle import run_meeting_leave_monitor
+from app.meeting_lifecycle import (
+    run_meeting_leave_monitor,
+    run_meeting_leave_watchdog,
+)
 from app.pipeline import attendee
 from app.schemas import (
     CalendarAutoJoinStatus,
@@ -74,7 +77,15 @@ async def _run_resilient_background_task(
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     db.init_db()
     db.delete_expired_screen_frames()
-    background_tasks: list[asyncio.Task[None]] = []
+    background_tasks: list[asyncio.Task[None]] = [
+        asyncio.create_task(
+            _run_resilient_background_task(
+                "meeting-leave-watchdog",
+                lambda: run_meeting_leave_watchdog(attendee),
+            ),
+            name="meeting-leave-watchdog",
+        )
+    ]
     if settings.google_calendar_auto_join_enabled:
         calendar_sync_wakeup = asyncio.Event()
         background_tasks.append(
@@ -447,6 +458,10 @@ async def leave_meeting(bot_id: str) -> JSONValue:
             "requesting",
             "requested",
             "uncertain",
+            "stuck",
+            "processing",
+            "completed",
+            "failed",
         }:
             return {"ok": True, "status": meeting["leave_status"]}
     try:
@@ -553,6 +568,7 @@ async def attendee_webhook(
         new_state = event_data.get("new_state")
         if _event_is_final(payload):
             db.update_bot_state(bot_id, "post_processing_completed")
+            db.finish_meeting_leave_watchdog(bot_id, "completed")
         elif new_state:
             db.update_bot_state(bot_id, str(new_state))
         if not _event_is_final(payload) and new_state == "joined_recording":

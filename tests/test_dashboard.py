@@ -300,6 +300,8 @@ class DashboardMeetingListTests(unittest.TestCase):
         self.assertEqual(len(meetings), 1)
         self.assertEqual(meetings[0]["bot_id"], "bot-dashboard")
         self.assertEqual(meetings[0]["task_count"], 1)
+        self.assertEqual(meetings[0]["leave_status"], "not_requested")
+        self.assertIsNone(meetings[0]["leave_stuck_at"])
 
 
 if __name__ == "__main__":

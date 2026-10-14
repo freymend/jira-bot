@@ -130,6 +130,8 @@ class DurableJobTests(unittest.TestCase):
                     "participant_presence_initialized",
                     "last_participant_event_at",
                     "leave_attempt_count",
+                    "leave_watchdog_checked_at",
+                    "leave_stuck_at",
                 }.issubset(meeting_columns)
             )
             self.assertTrue(
@@ -139,7 +141,7 @@ class DurableJobTests(unittest.TestCase):
                     "context_evidence_json",
                 }.issubset(task_columns)
             )
-            self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+            self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
             self.assertEqual(jobs, 1)
             self.assertIsNotNone(cache_table)
             self.assertIsNotNone(calendar_join_table)

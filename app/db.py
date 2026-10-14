@@ -20,6 +20,7 @@ from app.schemas import (
     JSONObject,
     MeetingLeaveCandidate,
     MeetingLeaveRetry,
+    MeetingLeaveWatchdogCandidate,
     MeetingRecord,
     MeetingTaskRecord,
     PersistedTaskPayload,
@@ -491,11 +492,142 @@ def claim_uncertain_meeting_leave_retry(
         result = connection.execute(
             """UPDATE meetings
                SET leave_status='requesting', leave_requested_at=?,
-                   leave_attempt_count=leave_attempt_count+1
+                   leave_attempt_count=leave_attempt_count+1,
+                   leave_watchdog_checked_at=NULL, leave_stuck_at=NULL
                WHERE bot_id=? AND bot_state='joined_recording'
                  AND leave_status='uncertain' AND leave_requested_at=?
                  AND leave_requested_at<=?""",
             (current.isoformat(), bot_id, expected_requested_at, cutoff),
+        )
+        return result.rowcount == 1
+
+
+def list_stale_meeting_leave_watchdog_candidates(
+    *,
+    timeout_seconds: int = 300,
+    poll_interval_seconds: int = 60,
+    now: datetime | None = None,
+) -> list[MeetingLeaveWatchdogCandidate]:
+    current = now or datetime.now(UTC)
+    stale_before = (current - timedelta(seconds=timeout_seconds)).isoformat()
+    checked_before = (current - timedelta(seconds=poll_interval_seconds)).isoformat()
+    with _connect() as connection:
+        rows = connection.execute(
+            """SELECT bot_id, leave_requested_at
+               FROM meetings
+               WHERE leave_status IN ('requested', 'stuck', 'processing')
+                 AND leave_requested_at IS NOT NULL AND leave_requested_at<=?
+                 AND (leave_watchdog_checked_at IS NULL
+                      OR leave_watchdog_checked_at<=?)
+               ORDER BY leave_requested_at""",
+            (stale_before, checked_before),
+        ).fetchall()
+        return [
+            {
+                "bot_id": row["bot_id"],
+                "leave_requested_at": row["leave_requested_at"],
+            }
+            for row in rows
+        ]
+
+
+def claim_meeting_leave_watchdog_poll(
+    bot_id: str,
+    expected_requested_at: str,
+    *,
+    timeout_seconds: int = 300,
+    poll_interval_seconds: int = 60,
+    now: datetime | None = None,
+) -> bool:
+    current = now or datetime.now(UTC)
+    stale_before = (current - timedelta(seconds=timeout_seconds)).isoformat()
+    checked_before = (current - timedelta(seconds=poll_interval_seconds)).isoformat()
+    with _connect() as connection:
+        result = connection.execute(
+            """UPDATE meetings SET leave_watchdog_checked_at=?
+               WHERE bot_id=? AND leave_requested_at=?
+                 AND leave_requested_at<=?
+                 AND leave_status IN ('requested', 'stuck', 'processing')
+                 AND (leave_watchdog_checked_at IS NULL
+                      OR leave_watchdog_checked_at<=?)""",
+            (
+                current.isoformat(),
+                bot_id,
+                expected_requested_at,
+                stale_before,
+                checked_before,
+            ),
+        )
+        return result.rowcount == 1
+
+
+def record_meeting_leave_watchdog_state(
+    bot_id: str,
+    expected_requested_at: str,
+    bot_state: str | None,
+    leave_status: str,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    if leave_status not in {"stuck", "processing", "failed"}:
+        raise ValueError("Invalid leave watchdog status")
+    current = now or datetime.now(UTC)
+    checked_at = current.isoformat()
+    with _connect() as connection:
+        meeting = connection.execute(
+            """SELECT leave_status, bot_state FROM meetings
+               WHERE bot_id=? AND leave_requested_at=?
+                 AND leave_status IN ('requested', 'stuck', 'processing')""",
+            (bot_id, expected_requested_at),
+        ).fetchone()
+        if meeting is None or meeting["bot_state"] == "post_processing_completed":
+            return False
+        result = connection.execute(
+            """UPDATE meetings SET bot_state=COALESCE(?, bot_state),
+                   leave_status=?, leave_watchdog_checked_at=?,
+                   leave_stuck_at=CASE WHEN ?='stuck'
+                       THEN COALESCE(leave_stuck_at, ?) ELSE NULL END
+               WHERE bot_id=? AND leave_requested_at=?
+                 AND leave_status IN ('requested', 'stuck', 'processing')
+                 AND bot_state IS NOT 'post_processing_completed'""",
+            (
+                bot_state,
+                leave_status,
+                checked_at,
+                leave_status,
+                checked_at,
+                bot_id,
+                expected_requested_at,
+            ),
+        )
+        return result.rowcount == 1 and meeting["leave_status"] != leave_status
+
+
+def finish_meeting_leave_watchdog(
+    bot_id: str,
+    status: str,
+    *,
+    expected_requested_at: str | None = None,
+) -> bool:
+    if status not in {"completed", "failed"}:
+        raise ValueError("Invalid leave watchdog result")
+    request_condition = (
+        " AND leave_requested_at=?" if expected_requested_at is not None else ""
+    )
+    parameters: tuple[SQLiteParameter, ...] = (
+        status,
+        _now(),
+        bot_id,
+        *((expected_requested_at,) if expected_requested_at is not None else ()),
+    )
+    with _connect() as connection:
+        result = connection.execute(
+            """UPDATE meetings SET leave_status=?, leave_stuck_at=NULL,
+                   leave_watchdog_checked_at=?
+               WHERE bot_id=? AND leave_status IN (
+                   'requesting', 'requested', 'uncertain', 'stuck', 'processing', 'failed'
+               )""" + request_condition,
+            parameters,
         )
         return result.rowcount == 1
 
@@ -608,7 +740,8 @@ def claim_meeting_leave(
         result = connection.execute(
             """UPDATE meetings
                SET leave_status='requesting', leave_reason=?, leave_requested_at=?,
-                   leave_attempt_count=leave_attempt_count+1
+                   leave_attempt_count=leave_attempt_count+1,
+                   leave_watchdog_checked_at=NULL, leave_stuck_at=NULL
                WHERE bot_id=? AND leave_status='not_requested'"""
             + state_condition
             + activity_condition,
@@ -1240,7 +1373,8 @@ def list_recent_meetings(limit: int = 25) -> list[RecentMeeting]:
     with _connect() as connection:
         rows = connection.execute(
             """SELECT m.bot_id, m.meeting_url, m.created_at, m.bot_state,
-                      m.transcription_state, m.status, m.error, COUNT(t.id) AS task_count
+                      m.transcription_state, m.status, m.error, m.leave_status,
+                      m.leave_stuck_at, COUNT(t.id) AS task_count
                FROM meetings AS m
                LEFT JOIN tasks AS t ON t.bot_id=m.bot_id
                GROUP BY m.bot_id
@@ -1259,6 +1393,8 @@ def list_recent_meetings(limit: int = 25) -> list[RecentMeeting]:
                     "transcription_state": row["transcription_state"],
                     "status": row["status"],
                     "error": row["error"],
+                    "leave_status": row["leave_status"],
+                    "leave_stuck_at": row["leave_stuck_at"],
                     "task_count": row["task_count"],
                 }
             )
@@ -1322,6 +1458,8 @@ def get_meeting(bot_id: str) -> MeetingRecord | None:
             "leave_status": meeting["leave_status"],
             "leave_requested_at": meeting["leave_requested_at"],
             "leave_reason": meeting["leave_reason"],
+            "leave_watchdog_checked_at": meeting["leave_watchdog_checked_at"],
+            "leave_stuck_at": meeting["leave_stuck_at"],
             "participant_tracking_enabled": meeting["participant_tracking_enabled"],
             "participant_presence_initialized": meeting[
                 "participant_presence_initialized"

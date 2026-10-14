@@ -16,8 +16,10 @@ from app.config import settings
 from app.meeting_lifecycle import (
     _assessment_means_leave,
     check_meeting_leave_decisions,
+    check_stale_leave_requests,
     transcript_indicates_wrap_up,
 )
+from app.schemas import AttendeeBotResponse, JSONValue
 
 
 class FakeAttendee:
@@ -29,11 +31,11 @@ class FakeAttendee:
         self.fail = fail
         self.bot_state = bot_state
 
-    async def get_bot(self, bot_id: str) -> dict[str, str]:
+    async def get_bot(self, bot_id: str) -> AttendeeBotResponse:
         self.get_bot_calls.append(bot_id)
         return {"id": bot_id, "state": self.bot_state}
 
-    async def leave_bot(self, bot_id: str) -> dict[str, bool]:
+    async def leave_bot(self, bot_id: str) -> JSONValue:
         self.calls.append(bot_id)
         if self.fail:
             raise RuntimeError("leave outcome unknown")
@@ -241,6 +243,133 @@ class MeetingLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["bot_state"], "fatal_error")
         self.assertEqual(saved["leave_status"], "uncertain")
 
+    async def test_watchdog_marks_stalled_leave_and_throttles_provider_polls(
+        self,
+    ) -> None:
+        now = datetime.now(UTC)
+        self._active_meeting()
+        self.assertTrue(db.claim_meeting_leave("bot-1", "maximum_runtime"))
+        db.finish_meeting_leave("bot-1", "requested")
+        requested_at = (now - timedelta(seconds=301)).isoformat()
+        with db._connect() as connection:
+            connection.execute(
+                """UPDATE meetings SET bot_state='leaving', leave_requested_at=?,
+                   leave_watchdog_checked_at=NULL WHERE bot_id='bot-1'""",
+                (requested_at,),
+            )
+        attendee = FakeAttendee(bot_state="leaving")
+
+        await check_stale_leave_requests(attendee, now)
+        saved = db.get_meeting("bot-1")
+        assert saved is not None
+        self.assertEqual(saved["bot_state"], "leaving")
+        self.assertEqual(saved["leave_status"], "stuck")
+        self.assertEqual(saved["leave_stuck_at"], now.isoformat())
+        self.assertEqual(attendee.get_bot_calls, ["bot-1"])
+        self.assertEqual(attendee.calls, [])
+
+        await check_stale_leave_requests(attendee, now + timedelta(seconds=30))
+        self.assertEqual(attendee.get_bot_calls, ["bot-1"])
+        await check_stale_leave_requests(attendee, now + timedelta(seconds=61))
+        self.assertEqual(attendee.get_bot_calls, ["bot-1", "bot-1"])
+        self.assertEqual(attendee.calls, [])
+
+    async def test_watchdog_tracks_processing_and_recovers_finalization_on_ended(
+        self,
+    ) -> None:
+        now = datetime.now(UTC)
+        self._active_meeting()
+        self.assertTrue(db.claim_meeting_leave("bot-1", "maximum_runtime"))
+        db.finish_meeting_leave("bot-1", "requested")
+        requested_at = (now - timedelta(seconds=301)).isoformat()
+        with db._connect() as connection:
+            connection.execute(
+                """UPDATE meetings SET bot_state='leaving', leave_requested_at=?,
+                   leave_watchdog_checked_at=NULL WHERE bot_id='bot-1'""",
+                (requested_at,),
+            )
+        attendee = FakeAttendee(bot_state="post_processing")
+
+        await check_stale_leave_requests(attendee, now)
+        saved = db.get_meeting("bot-1")
+        assert saved is not None
+        self.assertEqual(saved["bot_state"], "post_processing")
+        self.assertEqual(saved["leave_status"], "processing")
+        with db._connect() as connection:
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT id FROM background_jobs WHERE bot_id='bot-1'"
+                ).fetchone()
+            )
+
+        attendee.bot_state = "ended"
+        await check_stale_leave_requests(attendee, now + timedelta(seconds=61))
+        saved = db.get_meeting("bot-1")
+        assert saved is not None
+        self.assertEqual(saved["bot_state"], "post_processing_completed")
+        self.assertEqual(saved["leave_status"], "completed")
+        self.assertIsNone(saved["leave_stuck_at"])
+        with db._connect() as connection:
+            job = connection.execute(
+                "SELECT status FROM background_jobs WHERE bot_id='bot-1'"
+            ).fetchone()
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(attendee.get_bot_calls, ["bot-1", "bot-1"])
+
+    async def test_watchdog_surfaces_provider_terminal_error_without_finalizing(
+        self,
+    ) -> None:
+        now = datetime.now(UTC)
+        self._active_meeting()
+        self.assertTrue(db.claim_meeting_leave("bot-1", "maximum_runtime"))
+        db.finish_meeting_leave("bot-1", "requested")
+        requested_at = (now - timedelta(seconds=301)).isoformat()
+        with db._connect() as connection:
+            connection.execute(
+                """UPDATE meetings SET bot_state='leaving', leave_requested_at=?,
+                   leave_watchdog_checked_at=NULL WHERE bot_id='bot-1'""",
+                (requested_at,),
+            )
+        attendee = FakeAttendee(bot_state="fatal_error")
+
+        await check_stale_leave_requests(attendee, now)
+        saved = db.get_meeting("bot-1")
+        assert saved is not None
+        self.assertEqual(saved["bot_state"], "fatal_error")
+        self.assertEqual(saved["leave_status"], "failed")
+        self.assertEqual(saved["status"], "error")
+        with db._connect() as connection:
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT id FROM background_jobs WHERE bot_id='bot-1'"
+                ).fetchone()
+            )
+
+    async def test_uncertain_leave_reported_as_leaving_enters_watchdog(
+        self,
+    ) -> None:
+        now = datetime.now(UTC)
+        event_end = now - timedelta(minutes=61)
+        self._active_meeting(scheduled_end_at=event_end.isoformat())
+        attendee = FakeAttendee(fail=True, bot_state="leaving")
+
+        await check_meeting_leave_decisions(attendee, now)
+        await check_meeting_leave_decisions(attendee, now + timedelta(seconds=61))
+        saved = db.get_meeting("bot-1")
+        assert saved is not None
+        self.assertEqual(saved["leave_status"], "requested")
+        self.assertEqual(saved["bot_state"], "leaving")
+        self.assertEqual(attendee.calls, ["bot-1"])
+
+        await check_stale_leave_requests(attendee, now + timedelta(seconds=362))
+        saved = db.get_meeting("bot-1")
+        assert saved is not None
+        self.assertEqual(saved["leave_status"], "stuck")
+        self.assertEqual(attendee.calls, ["bot-1"])
+        self.assertEqual(attendee.get_bot_calls, ["bot-1", "bot-1"])
+
     async def test_empty_roster_leaves_only_after_bot_is_confirmed_recording(
         self,
     ) -> None:
@@ -314,7 +443,7 @@ class MeetingLeaveTests(unittest.IsolatedAsyncioTestCase):
         quiet_at = datetime.fromisoformat(participant_activity) + timedelta(seconds=90)
 
         class RejoiningAttendee(FakeAttendee):
-            async def get_bot(self, bot_id: str) -> dict[str, str]:
+            async def get_bot(self, bot_id: str) -> AttendeeBotResponse:
                 await super().get_bot(bot_id)
                 db.record_participant_event(
                     bot_id, "join-2", "participant-1", "Alex", False, "join", 300
@@ -494,16 +623,27 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
             with TestClient(api_app) as client:
                 first = client.post("/meetings/bot-manual/leave", headers=headers)
                 second = client.post("/meetings/bot-manual/leave", headers=headers)
+                meeting = db.get_meeting("bot-manual")
+                assert meeting is not None
+                db.record_meeting_leave_watchdog_state(
+                    "bot-manual",
+                    str(meeting["leave_requested_at"]),
+                    "leaving",
+                    "stuck",
+                )
+                third = client.post("/meetings/bot-manual/leave", headers=headers)
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json(), {"ok": True})
         self.assertEqual(second.status_code, 200)
         self.assertEqual(second.json(), {"ok": True, "status": "requested"})
+        self.assertEqual(third.status_code, 200)
+        self.assertEqual(third.json(), {"ok": True, "status": "stuck"})
         leave_bot.assert_awaited_once_with("bot-manual")
         meeting = db.get_meeting("bot-manual")
         assert meeting is not None
         self.assertEqual(meeting["leave_reason"], "manual")
-        self.assertEqual(meeting["leave_status"], "requested")
+        self.assertEqual(meeting["leave_status"], "stuck")
 
     def test_participant_webhooks_update_deduplicated_active_roster(self) -> None:
         db.create_meeting(
@@ -553,6 +693,8 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
 
     def test_final_state_webhook_stops_auto_leave_monitoring(self) -> None:
         db.create_meeting("bot-finished", None, "joined_recording")
+        self.assertTrue(db.claim_meeting_leave("bot-finished", "manual"))
+        db.finish_meeting_leave("bot-finished", "requested")
         started_payload = {
             "idempotency_key": "state-started",
             "trigger": "bot.state_change",
@@ -578,6 +720,7 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
         meeting = db.get_meeting("bot-finished")
         assert meeting is not None
         self.assertEqual(meeting["bot_state"], "post_processing_completed")
+        self.assertEqual(meeting["leave_status"], "completed")
         self.assertEqual(db.list_meetings_for_leave_check(), [])
 
 

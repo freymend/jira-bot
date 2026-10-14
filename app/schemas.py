@@ -200,6 +200,11 @@ class MeetingLeaveRetry(TypedDict):
     leave_requested_at: str
 
 
+class MeetingLeaveWatchdogCandidate(TypedDict):
+    bot_id: str
+    leave_requested_at: str
+
+
 class RecentTranscriptSegment(TypedDict):
     timestamp_ms: int | None
     speaker_name: str | None
@@ -228,6 +233,8 @@ class RecentMeeting(TypedDict):
     transcription_state: str
     status: str
     error: str | None
+    leave_status: str
+    leave_stuck_at: str | None
     task_count: int
 
 
@@ -333,6 +340,8 @@ class MeetingRecord(TypedDict):
     leave_status: str
     leave_requested_at: str | None
     leave_reason: str | None
+    leave_watchdog_checked_at: str | None
+    leave_stuck_at: str | None
     participant_tracking_enabled: int
     participant_presence_initialized: int
     last_participant_event_at: str | None

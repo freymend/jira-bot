@@ -1,6 +1,6 @@
 /** @typedef {"healthy"|"degraded"|"unavailable"|"not_configured"|"configured"|"disabled"|"enabled"|"unknown"} ServiceStatus */
 /** @typedef {{name: string, status: ServiceStatus, detail?: string}} DashboardService */
-/** @typedef {{bot_id: string, meeting_url?: string|null, created_at?: string|null, bot_state?: string|null, transcription_state?: string|null, status?: string|null, task_count: number, error?: string|null}} RecentMeeting */
+/** @typedef {{bot_id: string, meeting_url?: string|null, created_at?: string|null, bot_state?: string|null, transcription_state?: string|null, status?: string|null, leave_status?: string, leave_stuck_at?: string|null, task_count: number, error?: string|null}} RecentMeeting */
 /** @typedef {{event_id: string, event_title: string, event_start: string, event_end?: string|null, meeting_url: string, join_status: string, bot_id?: string|null, error?: string|null}} ScheduledCalendarJoin */
 /** @typedef {{enabled: boolean, event_title_filter?: string|null, start_time_filter?: string, organizer_email_filter?: string|null, time_zone?: string, source?: string, error?: string|null, upcoming_events: ScheduledCalendarJoin[]}} CalendarDashboardData */
 /** @typedef {{status: "healthy"|"degraded", updated_at: string, services: DashboardService[], recent_meetings: RecentMeeting[], calendar: CalendarDashboardData}} DashboardOverview */
@@ -192,7 +192,13 @@ function renderMeetings(meetings) {
       ? new Date(meeting.created_at).toLocaleString()
       : "—";
     const error = document.createElement("td");
-    error.textContent = meeting.error ? String(meeting.error).slice(0, 180) : "—";
+    const leaveNotice = meeting.leave_status === "stuck"
+      ? `Leave request unresolved since ${meeting.leave_stuck_at ? new Date(meeting.leave_stuck_at).toLocaleString() : "more than 5 minutes ago"}; no repeat leave was sent (attendee-labs/attendee#950).`
+      : meeting.leave_status === "failed"
+        ? `Attendee reached ${meeting.bot_state || "a terminal error"} during leave; finalization was not confirmed.`
+        : "";
+    const errorMessages = [meeting.error, leaveNotice].filter(Boolean);
+    error.textContent = errorMessages.length ? errorMessages.join(" · ").slice(0, 180) : "—";
     row.append(identity, botState, pipeline, tasks, created, error);
     body.append(row);
   }

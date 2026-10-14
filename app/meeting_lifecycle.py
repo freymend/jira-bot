@@ -17,6 +17,8 @@ from app.schemas import RecentTranscriptSegment, TranscriptSegment
 logger = logging.getLogger("jira-bot.meeting-lifecycle")
 _CHECK_INTERVAL_SECONDS = 15
 _LEAVE_RETRY_SECONDS = 60
+_LEAVE_WATCHDOG_TIMEOUT_SECONDS = 300
+_LEAVE_WATCHDOG_POLL_SECONDS = 60
 _MAX_TRANSCRIPT_SEGMENTS = 40
 _MAX_TRANSCRIPT_CHARS = 8000
 
@@ -195,6 +197,14 @@ async def _retry_uncertain_leave_requests(
             db.finish_meeting_leave(bot_id, "uncertain")
             continue
         db.update_bot_state(bot_id, live_state)
+        if live_state == "leaving":
+            db.finish_meeting_leave(bot_id, "requested")
+            logger.info(
+                "Attendee reports bot %s is leaving after an uncertain request; "
+                "the watchdog will verify completion",
+                bot_id,
+            )
+            continue
         if live_state != "joined_recording":
             db.finish_meeting_leave(bot_id, "uncertain")
             continue
@@ -216,6 +226,132 @@ async def _retry_uncertain_leave_requests(
             bot_id,
         )
     return requested
+
+
+async def _watch_stale_leave_requests(
+    attendee_client: AttendeeLifecycleClient, now: datetime
+) -> None:
+    candidates = db.list_stale_meeting_leave_watchdog_candidates(
+        timeout_seconds=_LEAVE_WATCHDOG_TIMEOUT_SECONDS,
+        poll_interval_seconds=_LEAVE_WATCHDOG_POLL_SECONDS,
+        now=now,
+    )
+    for meeting in candidates:
+        bot_id = meeting["bot_id"]
+        requested_at = meeting["leave_requested_at"]
+        if not db.claim_meeting_leave_watchdog_poll(
+            bot_id,
+            requested_at,
+            timeout_seconds=_LEAVE_WATCHDOG_TIMEOUT_SECONDS,
+            poll_interval_seconds=_LEAVE_WATCHDOG_POLL_SECONDS,
+            now=now,
+        ):
+            continue
+        try:
+            bot = await attendee_client.get_bot(bot_id)
+        except Exception:
+            transitioned = db.record_meeting_leave_watchdog_state(
+                bot_id, requested_at, None, "stuck", now=now
+            )
+            if transitioned:
+                logger.warning(
+                    "Attendee leave remains unconfirmed for bot %s; the provider state "
+                    "could not be checked. This is the workaround for attendee-labs/attendee#950.",
+                    bot_id,
+                    exc_info=True,
+                )
+            continue
+
+        live_state = bot.get("state")
+        if not isinstance(live_state, str) or not live_state:
+            transitioned = db.record_meeting_leave_watchdog_state(
+                bot_id, requested_at, None, "stuck", now=now
+            )
+            if transitioned:
+                logger.warning(
+                    "Attendee returned no state for overdue leave request on bot %s",
+                    bot_id,
+                )
+            continue
+
+        if live_state in {"ended", "post_processing_completed"}:
+            db.record_meeting_leave_watchdog_state(
+                bot_id,
+                requested_at,
+                "post_processing_completed",
+                "processing",
+                now=now,
+            )
+            finalization_status = db.enqueue_finalization(bot_id)
+            db.finish_meeting_leave_watchdog(
+                bot_id, "completed", expected_requested_at=requested_at
+            )
+            logger.info(
+                "Leave watchdog confirmed bot %s ended; finalization status=%s",
+                bot_id,
+                finalization_status,
+            )
+            continue
+
+        if live_state == "post_processing":
+            transitioned = db.record_meeting_leave_watchdog_state(
+                bot_id, requested_at, live_state, "processing", now=now
+            )
+            if transitioned:
+                logger.info(
+                    "Attendee bot %s entered post-processing after its leave request",
+                    bot_id,
+                )
+            continue
+
+        if live_state in {"fatal_error", "could_not_join_meeting", "data_deleted"}:
+            transitioned = db.record_meeting_leave_watchdog_state(
+                bot_id, requested_at, live_state, "failed", now=now
+            )
+            if transitioned:
+                db.set_meeting_status(
+                    bot_id,
+                    "error",
+                    f"Attendee bot entered {live_state} after a leave request; "
+                    "finalization was not confirmed.",
+                )
+                logger.error(
+                    "Attendee bot %s reached terminal state %s after a leave request",
+                    bot_id,
+                    live_state,
+                )
+            continue
+
+        transitioned = db.record_meeting_leave_watchdog_state(
+            bot_id, requested_at, live_state, "stuck", now=now
+        )
+        if transitioned:
+            logger.warning(
+                "Attendee leave is stalled for bot %s (provider state=%s); not "
+                "resending leave because Attendee rejects it in this state. See "
+                "attendee-labs/attendee#950 for the upstream workaround.",
+                bot_id,
+                live_state,
+            )
+
+
+async def check_stale_leave_requests(
+    attendee_client: AttendeeLifecycleClient, now: datetime | None = None
+) -> None:
+    await _watch_stale_leave_requests(attendee_client, now or datetime.now(UTC))
+
+
+async def run_meeting_leave_watchdog(
+    attendee_client: AttendeeLifecycleClient,
+) -> None:
+    while True:
+        try:
+            await check_stale_leave_requests(attendee_client)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Meeting leave watchdog failed")
+        await asyncio.sleep(_CHECK_INTERVAL_SECONDS)
 
 
 async def check_meeting_leave_decisions(

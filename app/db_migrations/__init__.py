@@ -17,6 +17,7 @@ from .v010_meeting_participant_presence import (
     migrate as _add_meeting_participant_presence,
 )
 from .v011_meeting_leave_retries import migrate as _add_meeting_leave_retries
+from .v012_leave_watchdog import migrate as _add_leave_watchdog
 
 
 def _now() -> str:
@@ -36,6 +37,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (9, _add_meeting_auto_leave),
     (10, _add_meeting_participant_presence),
     (11, _add_meeting_leave_retries),
+    (12, _add_leave_watchdog),
 )
 
 
