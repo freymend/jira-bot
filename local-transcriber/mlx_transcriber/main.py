@@ -18,6 +18,15 @@ app = FastAPI(title="Local MLX Whisper Transcriber")
 _transcription_lock = threading.Lock()
 
 
+def _scratch_dir() -> Path:
+    # Avoid the inherited TMPDIR: it may belong to a short-lived sandbox
+    # session and disappear while this service keeps running.
+    configured = os.getenv("MLX_TRANSCRIBER_TMP_DIR", "")
+    path = Path(configured) if configured else Path.home() / ".cache" / "mlx-transcriber"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 class WhisperWord(TypedDict, total=False):
     word: object
     start: object
@@ -55,8 +64,16 @@ class TranscriptionResponse(TypedDict):
     result: TranscriptionResult
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
+@app.get("/health", response_model=None)
+def health() -> dict[str, str] | JSONResponse:
+    try:
+        with tempfile.NamedTemporaryFile(dir=_scratch_dir()):
+            pass
+    except OSError:
+        logger.exception("Transcriber scratch directory is not writable")
+        return JSONResponse(
+            status_code=503, content={"status": "error", "error_code": "NO_SCRATCH_DIR"}
+        )
     return {"status": "ok"}
 
 
@@ -145,7 +162,9 @@ def transcribe(
             raise HTTPException(status_code=401, detail="Invalid transcriber token")
 
         model = os.getenv("MLX_WHISPER_MODEL", "mlx-community/whisper-turbo")
-        with tempfile.TemporaryDirectory(prefix="mlx-whisper-") as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="mlx-whisper-", dir=_scratch_dir()
+        ) as temp_dir:
             audio_path = Path(temp_dir) / "audio.mp3"
             with audio_path.open("wb") as output_file:
                 shutil.copyfileobj(audio.file, output_file)
