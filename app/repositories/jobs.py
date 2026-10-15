@@ -5,7 +5,13 @@ import sqlite3
 import time
 
 from app.repositories.database import _connect
-from app.schemas import BackgroundJob
+from app.schemas import (
+    BackgroundJob,
+    BackgroundJobClaimCandidate,
+    HealthChecks,
+    StatusRow,
+    WorkerHeartbeatRow,
+)
 
 
 def enqueue_finalization(bot_id: str, *, allow_reprocess: bool = False) -> str:
@@ -16,7 +22,8 @@ def enqueue_finalization(bot_id: str, *, allow_reprocess: bool = False) -> str:
         ).fetchone()
         if meeting is None:
             return "not_found"
-        if meeting["status"] == "completed":
+        meeting_status: StatusRow = {"status": meeting["status"]}
+        if meeting_status["status"] == "completed":
             return "completed"
 
         connection.execute(
@@ -32,7 +39,8 @@ def enqueue_finalization(bot_id: str, *, allow_reprocess: bool = False) -> str:
         if job is None:
             return "queued"
 
-        status = str(job["status"])
+        job_status: StatusRow = {"status": job["status"]}
+        status = job_status["status"]
         if allow_reprocess and status in {"completed", "failed"}:
             connection.execute(
                 """UPDATE background_jobs SET status='queued', attempts=0,
@@ -58,13 +66,18 @@ def claim_next_job(worker_id: str, *, lease_seconds: int = 60) -> BackgroundJob 
         ).fetchone()
         if row is None:
             return None
-        job_id = int(row["id"])
-        if row["status"] == "running":
+        candidate: BackgroundJobClaimCandidate = {
+            "id": row["id"],
+            "bot_id": row["bot_id"],
+            "status": row["status"],
+        }
+        job_id = int(candidate["id"])
+        if candidate["status"] == "running":
             connection.execute(
                 """UPDATE meetings SET status='retrying',
                      error='Worker lease expired; recovering the queued job.'
                    WHERE bot_id=?""",
-                (row["bot_id"],),
+                (candidate["bot_id"],),
             )
         connection.execute(
             """UPDATE background_jobs SET status='running', attempts=attempts+1,
@@ -116,7 +129,7 @@ def record_worker_heartbeat(worker_id: str) -> None:
         )
 
 
-def health_checks(*, worker_stale_after_seconds: int = 30) -> dict[str, bool]:
+def health_checks(*, worker_stale_after_seconds: int = 30) -> HealthChecks:
     try:
         with _connect() as connection:
             connection.execute("SELECT 1").fetchone()
@@ -127,7 +140,10 @@ def health_checks(*, worker_stale_after_seconds: int = 30) -> dict[str, bool]:
     except OSError, sqlite3.Error:
         return {"database": False, "worker": False}
 
-    latest = heartbeat["latest"] if heartbeat is not None else None
+    heartbeat_result: WorkerHeartbeatRow | None = (
+        {"latest": heartbeat["latest"]} if heartbeat is not None else None
+    )
+    latest = heartbeat_result["latest"] if heartbeat_result is not None else None
     return {
         "database": True,
         "worker": latest is not None

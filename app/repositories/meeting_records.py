@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 
 from app.repositories.database import _connect, _now
-from app.schemas import MeetingRecord, MeetingTaskRecord, RecentMeeting
+from app.schemas import (
+    MeetingRecordingOriginRow,
+    MeetingRecord,
+    MeetingTaskRecord,
+    RecentMeeting,
+)
 
 
 def create_meeting(
@@ -57,7 +62,10 @@ def set_recording_started_at(bot_id: str, started_at_ms: int) -> None:
         ).fetchone()
         if meeting is None:
             return
-        origin = meeting["recording_started_at_ms"] or started_at_ms
+        recording_origin: MeetingRecordingOriginRow = {
+            "recording_started_at_ms": meeting["recording_started_at_ms"],
+        }
+        origin = recording_origin["recording_started_at_ms"] or started_at_ms
         connection.execute(
             """UPDATE meetings
                SET recording_started_at_ms=?, screen_frame_origin_ms=?,

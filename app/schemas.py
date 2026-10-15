@@ -33,9 +33,9 @@ class ChatMessage(TypedDict):
 
 class MeetingContextSegment(TypedDict):
     text: str
-    timestamp_ms: object
-    speaker_name: object
-    source: str
+    timestamp_ms: JSONValue
+    speaker_name: JSONValue
+    source: Literal["transcript", "chat"]
 
 
 class CalendarEventDateTime(TypedDict, total=False):
@@ -115,6 +115,14 @@ class AttendeeBotSettings(TypedDict, total=False):
     transcription_settings: AttendeeTranscriptionSettings
     webhooks: list[AttendeeWebhookSettings]
     websocket_settings: AttendeeWebsocketSettings
+
+
+class CalendarSyncTokenRow(TypedDict):
+    sync_token: str
+
+
+class ExtractionCheckpointRow(TypedDict):
+    result_json: str
 
 
 class CalendarSyncUpsert(TypedDict):
@@ -205,10 +213,42 @@ class MeetingLeaveWatchdogCandidate(TypedDict):
     leave_requested_at: str
 
 
+class MeetingRecordingOriginRow(TypedDict):
+    recording_started_at_ms: int | None
+
+
+class ParticipantEventTimestampRow(TypedDict):
+    last_event_timestamp_ms: int | None
+
+
+class MeetingLeaveWatchdogStateRow(TypedDict):
+    leave_status: str
+    bot_state: str | None
+
+
 class RecentTranscriptSegment(TypedDict):
     timestamp_ms: int | None
     speaker_name: str | None
     text: str
+
+
+class StatusRow(TypedDict):
+    status: str
+
+
+class BackgroundJobClaimCandidate(TypedDict):
+    id: int
+    bot_id: str
+    status: str
+
+
+class WorkerHeartbeatRow(TypedDict):
+    latest: float | None
+
+
+class HealthChecks(TypedDict):
+    database: bool
+    worker: bool
 
 
 class BackgroundJob(TypedDict):
@@ -299,6 +339,12 @@ class MeetingStartResponse(TypedDict):
     screenshare_capture_enabled: bool
 
 
+class TaskPersistenceResult(TypedDict):
+    id: int
+    status: str
+    jira_key: str | None
+
+
 class MeetingTaskRecord(TypedDict):
     id: int
     bot_id: str
@@ -347,6 +393,24 @@ class MeetingRecord(TypedDict):
     last_participant_event_at: str | None
     leave_attempt_count: int
     tasks: list[MeetingTaskRecord]
+
+
+class ScreenCaptureStateRow(TypedDict):
+    recording_started_at_ms: int | None
+    screen_frame_origin_ms: int | None
+    screenshare_capture_enabled: int
+
+
+class ScreenFrameReceivedAtRow(TypedDict):
+    received_at_ms: int
+
+
+class ScreenFrameCountRow(TypedDict):
+    frame_count: int
+
+
+class ScreenCaptureEnabledRow(TypedDict):
+    screenshare_capture_enabled: int
 
 
 class ScreenFrameRecord(TypedDict):

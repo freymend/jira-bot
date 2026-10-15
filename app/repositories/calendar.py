@@ -6,6 +6,7 @@ from app.repositories.database import _connect, _now
 from app.schemas import (
     CalendarAutoJoin,
     CalendarScheduledEvent,
+    CalendarSyncTokenRow,
     CalendarSyncChange,
     CalendarWatchChannel,
 )
@@ -88,7 +89,10 @@ def get_calendar_sync_token(calendar_id: str) -> str | None:
             "SELECT sync_token FROM calendar_sync_state WHERE calendar_id=?",
             (calendar_id,),
         ).fetchone()
-        return str(row["sync_token"]) if row is not None else None
+        token: CalendarSyncTokenRow | None = (
+            {"sync_token": str(row["sync_token"])} if row is not None else None
+        )
+        return token["sync_token"] if token is not None else None
 
 
 def clear_calendar_sync_token(calendar_id: str) -> None:

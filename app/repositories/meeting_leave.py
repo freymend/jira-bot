@@ -5,6 +5,8 @@ from datetime import UTC, datetime, timedelta
 from app.repositories.database import SQLiteParameter, _connect, _now
 from app.schemas import (
     MeetingLeaveCandidate,
+    MeetingLeaveWatchdogStateRow,
+    ParticipantEventTimestampRow,
     MeetingLeaveRetry,
     MeetingLeaveWatchdogCandidate,
 )
@@ -76,10 +78,15 @@ def record_participant_event(
                WHERE bot_id=? AND participant_uuid=?""",
             (bot_id, participant_uuid),
         ).fetchone()
+        current_event: ParticipantEventTimestampRow | None = (
+            {"last_event_timestamp_ms": current["last_event_timestamp_ms"]}
+            if current is not None
+            else None
+        )
         if (
-            current is not None
-            and current["last_event_timestamp_ms"] is not None
-            and timestamp_ms < current["last_event_timestamp_ms"]
+            current_event is not None
+            and current_event["last_event_timestamp_ms"] is not None
+            and timestamp_ms < current_event["last_event_timestamp_ms"]
         ):
             return False
         is_present = event_type == "join"
@@ -248,7 +255,18 @@ def record_meeting_leave_watchdog_state(
                  AND leave_status IN ('requested', 'stuck', 'processing')""",
             (bot_id, expected_requested_at),
         ).fetchone()
-        if meeting is None or meeting["bot_state"] == "post_processing_completed":
+        meeting_state: MeetingLeaveWatchdogStateRow | None = (
+            {
+                "leave_status": meeting["leave_status"],
+                "bot_state": meeting["bot_state"],
+            }
+            if meeting is not None
+            else None
+        )
+        if (
+            meeting_state is None
+            or meeting_state["bot_state"] == "post_processing_completed"
+        ):
             return False
         result = connection.execute(
             """UPDATE meetings SET bot_state=COALESCE(?, bot_state),
@@ -268,7 +286,7 @@ def record_meeting_leave_watchdog_state(
                 expected_requested_at,
             ),
         )
-        return result.rowcount == 1 and meeting["leave_status"] != leave_status
+        return result.rowcount == 1 and meeting_state["leave_status"] != leave_status
 
 
 def finish_meeting_leave_watchdog(

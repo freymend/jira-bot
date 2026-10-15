@@ -22,7 +22,9 @@ def _scratch_dir() -> Path:
     # Avoid the inherited TMPDIR: it may belong to a short-lived sandbox
     # session and disappear while this service keeps running.
     configured = os.getenv("MLX_TRANSCRIBER_TMP_DIR", "")
-    path = Path(configured) if configured else Path.home() / ".cache" / "mlx-transcriber"
+    path = (
+        Path(configured) if configured else Path.home() / ".cache" / "mlx-transcriber"
+    )
     path.mkdir(parents=True, exist_ok=True)
     return path
 

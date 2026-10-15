@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 
 from app.repositories.database import _connect
-from app.schemas import PersistedTaskPayload
+from app.schemas import PersistedTaskPayload, TaskPersistenceResult
 
 
-def add_task(bot_id: str, task: PersistedTaskPayload) -> tuple[sqlite3.Row, bool]:
+def add_task(
+    bot_id: str, task: PersistedTaskPayload
+) -> tuple[TaskPersistenceResult, bool]:
     fingerprint_input = "\n".join(
         [
             (task.get("owner_speaker") or "").strip().casefold(),
@@ -69,10 +70,17 @@ def add_task(bot_id: str, task: PersistedTaskPayload) -> tuple[sqlite3.Row, bool
                 ),
             )
         row = connection.execute(
-            "SELECT * FROM tasks WHERE bot_id=? AND fingerprint=?",
+            "SELECT id, status, jira_key FROM tasks WHERE bot_id=? AND fingerprint=?",
             (bot_id, fingerprint),
         ).fetchone()
-        return row, inserted
+        if row is None:
+            raise RuntimeError("Task was not persisted")
+        result: TaskPersistenceResult = {
+            "id": row["id"],
+            "status": row["status"],
+            "jira_key": row["jira_key"],
+        }
+        return result, inserted
 
 
 def set_task_status(

@@ -4,7 +4,13 @@ import sqlite3
 import time
 
 from app.repositories import database
-from app.schemas import ScreenFrameRecord
+from app.schemas import (
+    ScreenCaptureEnabledRow,
+    ScreenCaptureStateRow,
+    ScreenFrameCountRow,
+    ScreenFrameReceivedAtRow,
+    ScreenFrameRecord,
+)
 
 
 def store_screen_frame(
@@ -24,27 +30,53 @@ def store_screen_frame(
                FROM meetings WHERE bot_id=?""",
             (bot_id,),
         ).fetchone()
-        if meeting is None or not meeting["screenshare_capture_enabled"]:
+        if meeting is None:
+            return None
+        capture_state: ScreenCaptureStateRow = {
+            "recording_started_at_ms": meeting["recording_started_at_ms"],
+            "screen_frame_origin_ms": meeting["screen_frame_origin_ms"],
+            "screenshare_capture_enabled": meeting["screenshare_capture_enabled"],
+        }
+        if not capture_state["screenshare_capture_enabled"]:
             return None
         last_frame = connection.execute(
             """SELECT received_at_ms FROM screen_frames
                WHERE bot_id=? ORDER BY received_at_ms DESC LIMIT 1""",
             (bot_id,),
         ).fetchone()
-        if last_frame is not None and (
-            received_at_ms - last_frame["received_at_ms"]
+        last_frame_received_at: ScreenFrameReceivedAtRow | None = (
+            {"received_at_ms": last_frame["received_at_ms"]}
+            if last_frame is not None
+            else None
+        )
+        if last_frame_received_at is not None and (
+            received_at_ms - last_frame_received_at["received_at_ms"]
             < database.settings.screenshare_sample_interval_seconds * 1000
         ):
             return None
-        frame_count = connection.execute(
-            "SELECT COUNT(*) FROM screen_frames WHERE bot_id=?", (bot_id,)
-        ).fetchone()[0]
-        if frame_count >= database.settings.screenshare_max_frames_per_meeting:
+        frame_count_row = connection.execute(
+            "SELECT COUNT(*) AS frame_count FROM screen_frames WHERE bot_id=?",
+            (bot_id,),
+        ).fetchone()
+        if frame_count_row is None:
+            raise RuntimeError("Screen-frame count query returned no row")
+        frame_count: ScreenFrameCountRow = {
+            "frame_count": frame_count_row["frame_count"],
+        }
+        if (
+            frame_count["frame_count"]
+            >= database.settings.screenshare_max_frames_per_meeting
+        ):
             return None
 
-        origin = meeting["recording_started_at_ms"] or meeting["screen_frame_origin_ms"]
+        origin = (
+            capture_state["recording_started_at_ms"]
+            or capture_state["screen_frame_origin_ms"]
+        )
         time_source = (
-            "recording_state" if meeting["recording_started_at_ms"] else "first_frame"
+            "recording_state"
+            if capture_state["recording_started_at_ms"]
+            else "first_frame"
         )
         if origin is None:
             origin = received_at_ms
@@ -152,4 +184,11 @@ def is_screenshare_capture_enabled(bot_id: str) -> bool:
             "SELECT screenshare_capture_enabled FROM meetings WHERE bot_id=?",
             (bot_id,),
         ).fetchone()
-        return row is not None and bool(row["screenshare_capture_enabled"])
+        capture_setting: ScreenCaptureEnabledRow | None = (
+            {"screenshare_capture_enabled": row["screenshare_capture_enabled"]}
+            if row is not None
+            else None
+        )
+        return capture_setting is not None and bool(
+            capture_setting["screenshare_capture_enabled"]
+        )

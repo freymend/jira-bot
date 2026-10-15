@@ -4,7 +4,7 @@ import json
 import time
 
 from app.repositories.database import _connect, _now
-from app.schemas import JSONObject
+from app.schemas import JSONObject, StatusRow
 
 
 def record_webhook(
@@ -34,7 +34,10 @@ def record_webhook(
             meeting = connection.execute(
                 "SELECT status FROM meetings WHERE bot_id=?", (bot_id,)
             ).fetchone()
-            if meeting is not None and meeting["status"] != "completed":
+            meeting_status: StatusRow | None = (
+                {"status": meeting["status"]} if meeting is not None else None
+            )
+            if meeting_status is not None and meeting_status["status"] != "completed":
                 now = time.time()
                 connection.execute(
                     """INSERT OR IGNORE INTO background_jobs

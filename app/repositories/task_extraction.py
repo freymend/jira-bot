@@ -4,7 +4,7 @@ import json
 import time
 
 from app.repositories.database import _connect
-from app.schemas import JSONValue
+from app.schemas import ExtractionCheckpointRow, JSONValue
 
 
 def clear_stale_extraction_checkpoints(bot_id: str, transcript_hash: str) -> None:
@@ -26,8 +26,9 @@ def get_extraction_checkpoint(
         ).fetchone()
         if row is None:
             return None
+        checkpoint: ExtractionCheckpointRow = {"result_json": row["result_json"]}
         try:
-            return json.loads(row["result_json"])
+            return json.loads(checkpoint["result_json"])
         except json.JSONDecodeError:
             connection.execute(
                 """DELETE FROM task_extraction_cache
