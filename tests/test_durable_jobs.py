@@ -22,7 +22,8 @@ class DurableJobTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         database_path = Path(self.temp_dir.name) / "test.sqlite3"
         self.settings_patch = patch(
-            "app.db.settings", replace(settings, database_path=str(database_path))
+            "app.repositories.database.settings",
+            replace(settings, database_path=str(database_path)),
         )
         self.settings_patch.start()
         db.init_db()
@@ -69,7 +70,7 @@ class DurableJobTests(unittest.TestCase):
                 )
 
             with patch(
-                "app.db.settings",
+                "app.repositories.database.settings",
                 replace(settings, database_path=str(database_path)),
             ):
                 db.init_db()
@@ -254,7 +255,7 @@ class DurableJobTests(unittest.TestCase):
         assert job is not None
 
         now = time.time()
-        with patch("app.db.random.uniform", return_value=1.0):
+        with patch("app.repositories.jobs.random.uniform", return_value=1.0):
             db.fail_job(
                 int(job["id"]),
                 "worker-1",

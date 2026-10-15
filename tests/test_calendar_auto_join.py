@@ -99,7 +99,7 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
         )
         self.settings_patch.start()
         self.db_settings_patch = patch(
-            "app.db.settings",
+            "app.repositories.database.settings",
             replace(
                 settings,
                 database_path=str(Path(self.temp_dir.name) / "calendar.sqlite3"),

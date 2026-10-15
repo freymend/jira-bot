@@ -110,7 +110,9 @@ class MeetingLeaveTests(unittest.IsolatedAsyncioTestCase):
             meeting_leave_max_runtime_minutes=120,
             meeting_leave_confidence_threshold=0.9,
         )
-        self.db_settings_patch = patch("app.db.settings", test_settings)
+        self.db_settings_patch = patch(
+            "app.repositories.database.settings", test_settings
+        )
         self.lifecycle_settings_patch = patch(
             "app.meeting_lifecycle.settings", test_settings
         )
@@ -632,26 +634,34 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_settings_patch = patch(
-            "app.db.settings",
+            "app.repositories.database.settings",
             replace(
                 settings,
                 database_path=str(Path(self.temp_dir.name) / "webhook.sqlite3"),
             ),
         )
-        self.app_settings_patch = patch(
-            "app.main.settings",
-            replace(
-                settings,
-                app_api_token="test-app-token",
-                google_calendar_auto_join_enabled=False,
-                meeting_auto_leave_enabled=False,
-            ),
+        self.app_settings = replace(
+            settings,
+            app_api_token="test-app-token",
+            google_calendar_auto_join_enabled=False,
+            meeting_auto_leave_enabled=False,
+        )
+        self.app_settings_patch = patch("app.main.settings", self.app_settings)
+        self.auth_settings_patch = patch(
+            "app.controllers.dependencies.settings", self.app_settings
+        )
+        self.meeting_settings_patch = patch(
+            "app.controllers.meetings.settings", self.app_settings
         )
         self.db_settings_patch.start()
         self.app_settings_patch.start()
+        self.auth_settings_patch.start()
+        self.meeting_settings_patch.start()
         db.init_db()
 
     def tearDown(self) -> None:
+        self.meeting_settings_patch.stop()
+        self.auth_settings_patch.stop()
         self.app_settings_patch.stop()
         self.db_settings_patch.stop()
         self.temp_dir.cleanup()
@@ -661,6 +671,7 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
         headers = {"Authorization": "Bearer test-app-token"}
         with (
             patch("app.main.attendee", new=attendee),
+            patch("app.controllers.meetings.attendee", new=attendee),
             TestClient(api_app) as client,
         ):
             response = client.post(
@@ -682,19 +693,22 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
         db.create_meeting("bot-manual", None, "waiting")
         attendee = FakeAttendee()
         headers = {"Authorization": "Bearer test-app-token"}
-        with patch("app.main.attendee", new=attendee):
-            with TestClient(api_app) as client:
-                first = client.post("/meetings/bot-manual/leave", headers=headers)
-                second = client.post("/meetings/bot-manual/leave", headers=headers)
-                meeting = db.get_meeting("bot-manual")
-                assert meeting is not None
-                db.record_meeting_leave_watchdog_state(
-                    "bot-manual",
-                    str(meeting["leave_requested_at"]),
-                    "leaving",
-                    "stuck",
-                )
-                third = client.post("/meetings/bot-manual/leave", headers=headers)
+        with (
+            patch("app.main.attendee", new=attendee),
+            patch("app.controllers.meetings.attendee", new=attendee),
+            TestClient(api_app) as client,
+        ):
+            first = client.post("/meetings/bot-manual/leave", headers=headers)
+            second = client.post("/meetings/bot-manual/leave", headers=headers)
+            meeting = db.get_meeting("bot-manual")
+            assert meeting is not None
+            db.record_meeting_leave_watchdog_state(
+                "bot-manual",
+                str(meeting["leave_requested_at"]),
+                "leaving",
+                "stuck",
+            )
+            third = client.post("/meetings/bot-manual/leave", headers=headers)
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json(), {"ok": True})
@@ -738,7 +752,9 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
                 "timestamp_ms": 200,
             },
         }
-        with patch("app.main.verify_attendee_signature", return_value=True):
+        with patch(
+            "app.controllers.webhooks.verify_attendee_signature", return_value=True
+        ):
             with TestClient(api_app) as client:
                 join = client.post("/webhooks/attendee", json=join_payload)
                 duplicate_join = client.post("/webhooks/attendee", json=join_payload)
@@ -770,7 +786,9 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
             "bot_id": "bot-finished",
             "data": {"event_type": "post_processing_completed"},
         }
-        with patch("app.main.verify_attendee_signature", return_value=True):
+        with patch(
+            "app.controllers.webhooks.verify_attendee_signature", return_value=True
+        ):
             with TestClient(api_app) as client:
                 client.post("/webhooks/attendee", json=started_payload)
                 response = client.post("/webhooks/attendee", json=final_payload)

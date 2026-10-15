@@ -70,7 +70,9 @@ class ScreenShareStorageTests(unittest.TestCase):
             screenshare_retention_hours=24,
             screenshare_max_frames_per_meeting=2,
         )
-        self.settings_patch = patch("app.db.settings", self.db_settings)
+        self.settings_patch = patch(
+            "app.repositories.database.settings", self.db_settings
+        )
         self.settings_patch.start()
         db.init_db()
         db.create_meeting(
@@ -138,7 +140,7 @@ class ScreenShareStorageTests(unittest.TestCase):
                 (time.time() - 7200, frame_id),
             )
         retention_settings = replace(self.db_settings, screenshare_retention_hours=1)
-        with patch("app.db.settings", retention_settings):
+        with patch("app.repositories.database.settings", retention_settings):
             self.assertEqual(db.delete_expired_screen_frames(), 1)
         self.assertIsNone(db.get_screen_frame("bot-screenshare", frame_id))
 
@@ -237,7 +239,7 @@ class ScreenShareContextTests(unittest.IsolatedAsyncioTestCase):
                 screenshare_sample_interval_seconds=1,
                 screenshare_max_frames_per_meeting=5,
             )
-            with patch("app.db.settings", db_settings):
+            with patch("app.repositories.database.settings", db_settings):
                 db.init_db()
                 db.create_meeting("bot-context", None, screenshare_capture_enabled=True)
                 start_ms = 1_700_000_000_000
@@ -264,7 +266,7 @@ class ScreenShareContextTests(unittest.IsolatedAsyncioTestCase):
                 screenshare_context_window_seconds=30,
             )
             with (
-                patch("app.db.settings", db_settings),
+                patch("app.repositories.database.settings", db_settings),
                 patch("app.integrations.screenshare.settings", context_settings),
                 patch("app.integrations.screenshare.AsyncOpenAI", return_value=client),
                 patch(
@@ -298,13 +300,17 @@ class ScreenShareWebSocketTests(unittest.TestCase):
                 google_calendar_auto_join_enabled=False,
                 meeting_auto_leave_enabled=False,
             )
-            with patch("app.db.settings", app_settings):
+            with patch("app.repositories.database.settings", app_settings):
                 db.init_db()
             attendee = FakeAttendee()
             with (
                 patch("app.main.settings", app_settings),
-                patch("app.db.settings", app_settings),
+                patch("app.controllers.dependencies.settings", app_settings),
+                patch("app.controllers.meetings.settings", app_settings),
+                patch("app.controllers.webhooks.settings", app_settings),
+                patch("app.repositories.database.settings", app_settings),
                 patch("app.main.attendee", new=attendee),
+                patch("app.controllers.meetings.attendee", new=attendee),
                 TestClient(app) as client,
             ):
                 db.create_meeting("bot-ws", None, screenshare_capture_enabled=True)
@@ -375,13 +381,17 @@ class ScreenShareWebSocketTests(unittest.TestCase):
                 google_calendar_auto_join_enabled=False,
                 meeting_auto_leave_enabled=False,
             )
-            with patch("app.db.settings", app_settings):
+            with patch("app.repositories.database.settings", app_settings):
                 db.init_db()
             attendee = FakeAttendee()
             with (
                 patch("app.main.settings", app_settings),
-                patch("app.db.settings", app_settings),
+                patch("app.controllers.dependencies.settings", app_settings),
+                patch("app.controllers.meetings.settings", app_settings),
+                patch("app.controllers.webhooks.settings", app_settings),
+                patch("app.repositories.database.settings", app_settings),
                 patch("app.main.attendee", new=attendee),
+                patch("app.controllers.meetings.attendee", new=attendee),
                 TestClient(app) as client,
             ):
                 response = client.post(
@@ -405,13 +415,17 @@ class ScreenShareWebSocketTests(unittest.TestCase):
                 google_calendar_auto_join_enabled=False,
                 meeting_auto_leave_enabled=False,
             )
-            with patch("app.db.settings", app_settings):
+            with patch("app.repositories.database.settings", app_settings):
                 db.init_db()
             attendee = FakeAttendee()
             with (
                 patch("app.main.settings", app_settings),
-                patch("app.db.settings", app_settings),
+                patch("app.controllers.dependencies.settings", app_settings),
+                patch("app.controllers.meetings.settings", app_settings),
+                patch("app.controllers.webhooks.settings", app_settings),
+                patch("app.repositories.database.settings", app_settings),
                 patch("app.main.attendee", new=attendee),
+                patch("app.controllers.meetings.attendee", new=attendee),
                 TestClient(app) as client,
             ):
                 with self.assertRaises(WebSocketDisconnect):

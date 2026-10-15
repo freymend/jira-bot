@@ -181,13 +181,16 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
         attendee_client = FakeAttendee("bot-1")
 
         with (
-            patch("app.main.settings", configured),
+            patch("app.services.dashboard.settings", configured),
             patch("app.calendar_scheduler.settings", configured),
             patch("app.main.db.get_current_calendar_watch", return_value=None),
             patch("app.main.db.list_due_calendar_events", return_value=[]),
             patch("app.main.db.list_calendar_auto_joins", return_value=[]),
-            patch("app.main.GoogleCalendarClient", return_value=calendar_client),
-            patch("app.main._DASHBOARD_CALENDAR_CACHE", None),
+            patch(
+                "app.services.dashboard.GoogleCalendarClient",
+                return_value=calendar_client,
+            ),
+            patch("app.services.dashboard._DASHBOARD_CALENDAR_CACHE", None),
             patch(
                 "app.calendar_scheduler.db.claim_calendar_auto_join", return_value=True
             ),
@@ -229,12 +232,12 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
         configured = self._settings()
         attendee_client = FakeAttendee("bot-push")
         with (
-            patch("app.main.settings", configured),
+            patch("app.services.dashboard.settings", configured),
             patch("app.calendar_scheduler.settings", configured),
             patch("app.main.db.get_current_calendar_watch", return_value=watch),
             patch("app.main.db.list_due_calendar_events", return_value=[row]),
             patch("app.main.db.list_calendar_auto_joins", return_value=[]),
-            patch("app.main.GoogleCalendarClient") as calendar_client,
+            patch("app.services.dashboard.GoogleCalendarClient") as calendar_client,
             patch(
                 "app.calendar_scheduler.db.claim_calendar_auto_join", return_value=True
             ),
@@ -268,17 +271,20 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
         }
         configured = self._settings()
         with (
-            patch("app.main.settings", configured),
+            patch("app.services.dashboard.settings", configured),
             patch(
                 "app.main.db.health_checks",
                 return_value={"database": True, "worker": True},
             ),
             patch("app.main.db.list_recent_meetings", return_value=[]),
             patch(
-                "app.main._dashboard_calendar_schedule",
+                "app.services.dashboard._dashboard_calendar_schedule",
                 new=AsyncMock(return_value=([event], "calendar_api", None)),
             ),
-            patch("app.main._probe_service", new=AsyncMock(return_value="healthy")),
+            patch(
+                "app.services.dashboard._probe_service",
+                new=AsyncMock(return_value="healthy"),
+            ),
         ):
             result = await dashboard_overview()
 
@@ -294,7 +300,7 @@ class DashboardMeetingListTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database_patch = patch(
-            "app.db.settings",
+            "app.repositories.database.settings",
             replace(
                 settings, database_path=str(Path(self.temp_dir.name) / "db.sqlite3")
             ),

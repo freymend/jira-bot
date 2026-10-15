@@ -36,7 +36,8 @@ class TaskExtractionResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         database_path = Path(self.temp_dir.name) / "test.sqlite3"
         self.settings_patch = patch(
-            "app.db.settings", replace(settings, database_path=str(database_path))
+            "app.repositories.database.settings",
+            replace(settings, database_path=str(database_path)),
         )
         self.settings_patch.start()
         db.init_db()
