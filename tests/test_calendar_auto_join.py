@@ -17,6 +17,8 @@ from fastapi.testclient import TestClient
 from app import db
 from app.main import app as api_app
 from app.calendar_scheduler import (
+    CalendarSyncClient,
+    CalendarWatchClient,
     _ensure_calendar_watch,
     accept_calendar_notification,
     request_due_meetings,
@@ -25,6 +27,7 @@ from app.calendar_scheduler import (
     sync_calendar_events,
 )
 from app.config import settings
+from app.integrations.attendee import AttendeeCalendarClient
 from app.integrations.google_calendar import GoogleCalendarClient
 from app.schemas import (
     CalendarEvent,
@@ -35,7 +38,7 @@ from app.schemas import (
 )
 
 
-class FakeAttendee:
+class FakeAttendee(AttendeeCalendarClient):
     def __init__(self, fail: bool = False) -> None:
         self.calls: list[str] = []
         self.fail = fail
@@ -47,7 +50,7 @@ class FakeAttendee:
         return {"id": "bot-calendar-1", "state": "waiting"}
 
 
-class FakeWatchClient:
+class FakeWatchClient(CalendarWatchClient):
     def __init__(self) -> None:
         self.callback_url: str | None = None
         self.stopped: list[str] = []
@@ -66,7 +69,7 @@ class FakeWatchClient:
         self.stopped.append(channel_id)
 
 
-class FakeSyncClient:
+class FakeSyncClient(CalendarSyncClient):
     def __init__(self, event_pages: list[list[CalendarEvent]]) -> None:
         self.event_pages = event_pages
         self.tokens: list[str | None] = []
@@ -273,7 +276,7 @@ class CalendarAutoJoinTests(unittest.IsolatedAsyncioTestCase):
         db.apply_calendar_sync("primary", [], "expired-token", replace_all=True)
         event = self._event()
 
-        class ExpiredSyncClient:
+        class ExpiredSyncClient(CalendarSyncClient):
             def __init__(self) -> None:
                 self.tokens: list[str | None] = []
 

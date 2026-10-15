@@ -31,7 +31,22 @@ class AttendeeLifecycleClient(Protocol):
     async def get_bot(self, bot_id: str) -> AttendeeBotResponse: ...
 
 
-class AttendeeClient:
+class AttendeeClientProtocol(AttendeeCalendarClient, AttendeeLifecycleClient, Protocol):
+    async def create_bot(
+        self,
+        meeting_url: str,
+        *,
+        screen_share_capture: bool | None = None,
+    ) -> CreatedAttendeeBot: ...
+
+    async def get_transcript(self, bot_id: str) -> JSONValue: ...
+
+    async def get_chat_messages(self, bot_id: str) -> list[ChatMessage]: ...
+
+    async def close(self) -> None: ...
+
+
+class AttendeeClient(AttendeeClientProtocol):
     def __init__(self) -> None:
         self.client = httpx.AsyncClient(
             base_url=settings.attendee_api_base.rstrip("/") + "/",

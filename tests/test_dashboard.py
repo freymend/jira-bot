@@ -5,8 +5,6 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, time as datetime_time, timedelta
 from pathlib import Path
-from types import SimpleNamespace
-from typing import cast
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
@@ -21,8 +19,35 @@ from app.calendar_scheduler import (
 from app.config import settings
 from app.dashboard import server as dashboard
 from app.integrations.attendee import AttendeeCalendarClient
+from app.integrations.google_calendar import CalendarEventsClient
 from app.main import _dashboard_calendar_schedule, dashboard_overview
-from app.schemas import CalendarEvent
+from app.schemas import CalendarEvent, CreatedAttendeeBot
+
+
+class FakeAttendee(AttendeeCalendarClient):
+    def __init__(self, bot_id: str) -> None:
+        self.bot_id = bot_id
+        self.calls: list[str] = []
+
+    async def create_bot(self, meeting_url: str) -> CreatedAttendeeBot:
+        self.calls.append(meeting_url)
+        return {"id": self.bot_id, "state": "waiting"}
+
+
+class FakeCalendarEventsClient(CalendarEventsClient):
+    def __init__(self, events: list[CalendarEvent]) -> None:
+        self.events = events
+        self.list_events_calls: list[tuple[datetime, datetime]] = []
+        self.closed = False
+
+    async def list_events(
+        self, time_min: datetime, time_max: datetime
+    ) -> list[CalendarEvent]:
+        self.list_events_calls.append((time_min, time_max))
+        return self.events
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class DashboardConfigTests(unittest.TestCase):
@@ -151,14 +176,9 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
             "end": {"dateTime": event_end.isoformat()},
             "hangoutLink": "https://meet.google.com/abc-defg-hij",
         }
-        calendar_client = AsyncMock()
-        calendar_client.list_events = AsyncMock(return_value=[raw_event])
-        calendar_client.close = AsyncMock()
+        calendar_client = FakeCalendarEventsClient([raw_event])
         configured = self._settings()
-        create_bot = AsyncMock(return_value={"id": "bot-1"})
-        attendee_client = cast(
-            AttendeeCalendarClient, SimpleNamespace(create_bot=create_bot)
-        )
+        attendee_client = FakeAttendee("bot-1")
 
         with (
             patch("app.main.settings", configured),
@@ -188,11 +208,13 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]["event_id"], "event-1")
         self.assertEqual(events[0]["join_status"], "scheduled")
         self.assertEqual(requested, 1)
-        create_bot.assert_awaited_once_with("https://meet.google.com/abc-defg-hij")
-        calendar_client.list_events.assert_awaited_once_with(
-            now, now + timedelta(days=14)
+        self.assertEqual(
+            attendee_client.calls, ["https://meet.google.com/abc-defg-hij"]
         )
-        calendar_client.close.assert_awaited_once()
+        self.assertEqual(
+            calendar_client.list_events_calls, [(now, now + timedelta(days=14))]
+        )
+        self.assertTrue(calendar_client.closed)
 
     async def test_push_mode_uses_synchronized_calendar_rows(self) -> None:
         now = datetime.now(UTC)
@@ -205,10 +227,7 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
         }
         watch = {"expiration_ms": int((now + timedelta(days=1)).timestamp() * 1000)}
         configured = self._settings()
-        create_bot = AsyncMock(return_value={"id": "bot-push"})
-        attendee_client = cast(
-            AttendeeCalendarClient, SimpleNamespace(create_bot=create_bot)
-        )
+        attendee_client = FakeAttendee("bot-push")
         with (
             patch("app.main.settings", configured),
             patch("app.calendar_scheduler.settings", configured),
@@ -233,7 +252,7 @@ class DashboardCalendarScheduleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(error)
         self.assertEqual(events[0]["event_id"], "event-push")
         self.assertEqual(requested, 1)
-        create_bot.assert_awaited_once_with(row["meeting_url"])
+        self.assertEqual(attendee_client.calls, [row["meeting_url"]])
         calendar_client.assert_not_called()
 
     async def test_overview_includes_calendar_events_and_source(self) -> None:

@@ -9,7 +9,7 @@ import time as monotonic_time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
-from typing import Literal, Protocol
+from typing import Literal
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -18,8 +18,13 @@ import httpx
 from app import db
 from app.config import settings
 from app.integrations.attendee import AttendeeCalendarClient
-from app.integrations.google_calendar import GoogleCalendarClient
-from app.schemas import CalendarEvent, CalendarSyncChange, CalendarWatchResponse
+from app.integrations.google_calendar import (
+    CalendarSyncClient,
+    CalendarWatchClient,
+    GoogleCalendarClient,
+    GoogleCalendarClientProtocol,
+)
+from app.schemas import CalendarEvent, CalendarSyncChange
 
 logger = logging.getLogger("jira-bot.calendar")
 _SYNC_WAKEUP: asyncio.Event | None = None
@@ -52,24 +57,6 @@ def accept_calendar_notification(
     if _SYNC_WAKEUP is not None:
         _SYNC_WAKEUP.set()
     return True
-
-
-class CalendarWatchClient(Protocol):
-    async def watch_events(
-        self,
-        channel_id: str,
-        callback_url: str,
-        channel_token: str,
-        expiration_ms: int,
-    ) -> CalendarWatchResponse: ...
-
-    async def stop_watching(self, channel_id: str, resource_id: str) -> None: ...
-
-
-class CalendarSyncClient(Protocol):
-    async def sync_events(
-        self, sync_token: str | None
-    ) -> tuple[list[CalendarEvent], str]: ...
 
 
 @dataclass(frozen=True)
@@ -434,7 +421,7 @@ async def run_calendar_auto_join(
         return
 
     set_calendar_sync_wakeup(sync_wakeup)
-    calendar = GoogleCalendarClient()
+    calendar: GoogleCalendarClientProtocol = GoogleCalendarClient()
     try:
         logger.info(
             "Google Calendar auto-join enabled for %s at %s %s",

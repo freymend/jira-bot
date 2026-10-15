@@ -13,6 +13,10 @@ from fastapi.testclient import TestClient
 from app import db
 from app.main import app as api_app
 from app.config import settings
+from app.integrations.attendee import (
+    AttendeeClientProtocol,
+    AttendeeLifecycleClient,
+)
 from app.meeting_lifecycle import (
     _assessment_means_leave,
     check_meeting_leave_decisions,
@@ -21,6 +25,8 @@ from app.meeting_lifecycle import (
 )
 from app.schemas import (
     AttendeeBotResponse,
+    ChatMessage,
+    CreatedAttendeeBot,
     JSONValue,
     MeetingRecord,
     RecentTranscriptSegment,
@@ -28,14 +34,30 @@ from app.schemas import (
 )
 
 
-class FakeAttendee:
+class FakeAttendee(AttendeeClientProtocol):
     def __init__(
-        self, *, fail: bool = False, bot_state: str = "joined_recording"
+        self,
+        *,
+        fail: bool = False,
+        bot_state: str = "joined_recording",
+        created_bot_id: str = "bot-created",
     ) -> None:
         self.calls: list[str] = []
         self.get_bot_calls: list[str] = []
+        self.create_bot_calls: list[tuple[str, bool | None]] = []
+        self.close_calls = 0
         self.fail = fail
         self.bot_state = bot_state
+        self.created_bot_id = created_bot_id
+
+    async def create_bot(
+        self,
+        meeting_url: str,
+        *,
+        screen_share_capture: bool | None = None,
+    ) -> CreatedAttendeeBot:
+        self.create_bot_calls.append((meeting_url, screen_share_capture))
+        return {"id": self.created_bot_id, "state": "waiting"}
 
     async def get_bot(self, bot_id: str) -> AttendeeBotResponse:
         self.get_bot_calls.append(bot_id)
@@ -46,6 +68,15 @@ class FakeAttendee:
         if self.fail:
             raise RuntimeError("leave outcome unknown")
         return {"ok": True}
+
+    async def get_transcript(self, bot_id: str) -> JSONValue:
+        return []
+
+    async def get_chat_messages(self, bot_id: str) -> list[ChatMessage]:
+        return []
+
+    async def close(self) -> None:
+        self.close_calls += 1
 
 
 def _transcript_segment(
@@ -461,13 +492,21 @@ class MeetingLeaveTests(unittest.IsolatedAsyncioTestCase):
         assert isinstance(participant_activity, str)
         quiet_at = datetime.fromisoformat(participant_activity) + timedelta(seconds=90)
 
-        class RejoiningAttendee(FakeAttendee):
+        class RejoiningAttendee(AttendeeLifecycleClient):
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+                self.get_bot_calls: list[str] = []
+
             async def get_bot(self, bot_id: str) -> AttendeeBotResponse:
-                await super().get_bot(bot_id)
+                self.get_bot_calls.append(bot_id)
                 db.record_participant_event(
                     bot_id, "join-2", "participant-1", "Alex", False, "join", 300
                 )
                 return {"id": bot_id, "state": "joined_recording"}
+
+            async def leave_bot(self, bot_id: str) -> JSONValue:
+                self.calls.append(bot_id)
+                return {"ok": True}
 
         attendee = RejoiningAttendee()
         self.assertEqual(await check_meeting_leave_decisions(attendee, quiet_at), 0)
@@ -618,11 +657,10 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_manual_meeting_creation_enables_participant_tracking(self) -> None:
-        create_bot = AsyncMock(return_value={"id": "bot-created", "state": "waiting"})
+        attendee = FakeAttendee(created_bot_id="bot-created")
         headers = {"Authorization": "Bearer test-app-token"}
         with (
-            patch("app.main.attendee.create_bot", new=create_bot),
-            patch("app.main.attendee.close", new=AsyncMock()),
+            patch("app.main.attendee", new=attendee),
             TestClient(api_app) as client,
         ):
             response = client.post(
@@ -632,16 +670,19 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        create_bot.assert_awaited_once()
+        self.assertEqual(
+            attendee.create_bot_calls,
+            [("https://meet.google.com/abc-defg-hij", False)],
+        )
         meeting = db.get_meeting("bot-created")
         assert meeting is not None
         self.assertEqual(meeting["participant_tracking_enabled"], 1)
 
     def test_manual_leave_is_persisted_and_not_sent_twice(self) -> None:
         db.create_meeting("bot-manual", None, "waiting")
-        leave_bot = AsyncMock(return_value={"ok": True})
+        attendee = FakeAttendee()
         headers = {"Authorization": "Bearer test-app-token"}
-        with patch("app.main.attendee.leave_bot", new=leave_bot):
+        with patch("app.main.attendee", new=attendee):
             with TestClient(api_app) as client:
                 first = client.post("/meetings/bot-manual/leave", headers=headers)
                 second = client.post("/meetings/bot-manual/leave", headers=headers)
@@ -661,7 +702,7 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
         self.assertEqual(second.json(), {"ok": True, "status": "requested"})
         self.assertEqual(third.status_code, 200)
         self.assertEqual(third.json(), {"ok": True, "status": "stuck"})
-        leave_bot.assert_awaited_once_with("bot-manual")
+        self.assertEqual(attendee.calls, ["bot-manual"])
         meeting = db.get_meeting("bot-manual")
         assert meeting is not None
         self.assertEqual(meeting["leave_reason"], "manual")

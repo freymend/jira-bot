@@ -4,8 +4,8 @@ import logging
 
 from app import db
 from app.config import settings
-from app.integrations.attendee import AttendeeClient
-from app.integrations.jira import JiraClient
+from app.integrations.attendee import AttendeeClient, AttendeeClientProtocol
+from app.integrations.jira import JiraClient, JiraClientProtocol
 from app.integrations.screenshare import add_screenshare_context
 from app.integrations.task_extraction import extract_tasks
 from app.integrations.transcript import normalize_segments
@@ -13,8 +13,8 @@ from app.network import is_ambiguous_write_error, is_safe_to_retry_write
 from app.schemas import JiraScreenFrame, PersistedTaskPayload, TaskProposal
 
 logger = logging.getLogger("jira-bot.pipeline")
-attendee = AttendeeClient()
-jira = JiraClient()
+attendee: AttendeeClientProtocol = AttendeeClient()
+jira: JiraClientProtocol = JiraClient()
 
 
 def _task_payload(proposal: TaskProposal) -> PersistedTaskPayload:

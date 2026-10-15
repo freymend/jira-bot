@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Protocol
 
 import httpx
 
@@ -19,6 +20,16 @@ from app.schemas import (
 )
 
 logger = logging.getLogger("jira-bot.jira")
+
+
+class JiraClientProtocol(Protocol):
+    async def create_issue(
+        self,
+        task: TaskPayload | PersistedTaskPayload,
+        meeting_url: str | None,
+        *,
+        screen_frames: list[JiraScreenFrame] | None = None,
+    ) -> str: ...
 
 
 def _paragraph(text: str) -> JiraParagraph:
@@ -59,7 +70,7 @@ def _jira_error_details(response: httpx.Response) -> str:
     return "; ".join(details) or "No structured error details returned."
 
 
-class JiraClient:
+class JiraClient(JiraClientProtocol):
     async def create_issue(
         self,
         task: TaskPayload | PersistedTaskPayload,

@@ -16,11 +16,48 @@ from starlette.websockets import WebSocketDisconnect
 
 from app import db
 from app.config import settings
-from app.integrations.attendee import AttendeeClient
+from app.integrations.attendee import AttendeeClient, AttendeeClientProtocol
 from app.integrations.jira import JiraClient
 from app.integrations.screenshare import add_screenshare_context, summarize_screen_frame
 from app.main import app
-from app.schemas import TaskPayload, TaskProposal
+from app.schemas import (
+    AttendeeBotResponse,
+    ChatMessage,
+    CreatedAttendeeBot,
+    JSONValue,
+    TaskPayload,
+    TaskProposal,
+)
+
+
+class FakeAttendee(AttendeeClientProtocol):
+    def __init__(self) -> None:
+        self.create_bot_calls: list[tuple[str, bool | None]] = []
+        self.close_calls = 0
+
+    async def create_bot(
+        self,
+        meeting_url: str,
+        *,
+        screen_share_capture: bool | None = None,
+    ) -> CreatedAttendeeBot:
+        self.create_bot_calls.append((meeting_url, screen_share_capture))
+        return {"id": "bot-created", "state": "waiting"}
+
+    async def leave_bot(self, bot_id: str) -> JSONValue:
+        return {"ok": True}
+
+    async def get_bot(self, bot_id: str) -> AttendeeBotResponse:
+        return {"id": bot_id, "state": "joined_recording"}
+
+    async def get_transcript(self, bot_id: str) -> JSONValue:
+        return []
+
+    async def get_chat_messages(self, bot_id: str) -> list[ChatMessage]:
+        return []
+
+    async def close(self) -> None:
+        self.close_calls += 1
 
 
 class ScreenShareStorageTests(unittest.TestCase):
@@ -263,10 +300,11 @@ class ScreenShareWebSocketTests(unittest.TestCase):
             )
             with patch("app.db.settings", app_settings):
                 db.init_db()
+            attendee = FakeAttendee()
             with (
                 patch("app.main.settings", app_settings),
                 patch("app.db.settings", app_settings),
-                patch("app.main.attendee.close", new=AsyncMock()),
+                patch("app.main.attendee", new=attendee),
                 TestClient(app) as client,
             ):
                 db.create_meeting("bot-ws", None, screenshare_capture_enabled=True)
@@ -339,12 +377,11 @@ class ScreenShareWebSocketTests(unittest.TestCase):
             )
             with patch("app.db.settings", app_settings):
                 db.init_db()
-            create_bot = AsyncMock()
+            attendee = FakeAttendee()
             with (
                 patch("app.main.settings", app_settings),
                 patch("app.db.settings", app_settings),
-                patch("app.main.attendee.create_bot", new=create_bot),
-                patch("app.main.attendee.close", new=AsyncMock()),
+                patch("app.main.attendee", new=attendee),
                 TestClient(app) as client,
             ):
                 response = client.post(
@@ -356,7 +393,7 @@ class ScreenShareWebSocketTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(response.status_code, 400)
-                create_bot.assert_not_awaited()
+                self.assertEqual(attendee.create_bot_calls, [])
 
     def test_websocket_rejects_wrong_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -370,10 +407,11 @@ class ScreenShareWebSocketTests(unittest.TestCase):
             )
             with patch("app.db.settings", app_settings):
                 db.init_db()
+            attendee = FakeAttendee()
             with (
                 patch("app.main.settings", app_settings),
                 patch("app.db.settings", app_settings),
-                patch("app.main.attendee.close", new=AsyncMock()),
+                patch("app.main.attendee", new=attendee),
                 TestClient(app) as client,
             ):
                 with self.assertRaises(WebSocketDisconnect):

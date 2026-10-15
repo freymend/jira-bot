@@ -33,7 +33,10 @@ from app.calendar_scheduler import (
 )
 from app.config import settings
 from app.integrations.attendee import verify_attendee_signature
-from app.integrations.google_calendar import GoogleCalendarClient
+from app.integrations.google_calendar import (
+    CalendarEventsClient,
+    GoogleCalendarClient,
+)
 from app.integrations.transcript import normalize_segments
 from app.meeting_lifecycle import (
     run_meeting_leave_monitor,
@@ -236,7 +239,7 @@ async def _dashboard_calendar_schedule(
         cached = _DASHBOARD_CALENDAR_CACHE[2]
         return cached, "calendar_api_cache", None
 
-    calendar = GoogleCalendarClient()
+    calendar: CalendarEventsClient = GoogleCalendarClient()
     try:
         events = await calendar.list_events(now, now + timedelta(days=14))
         scheduled = [

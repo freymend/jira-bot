@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 from urllib.parse import quote
 
 import httpx
@@ -10,7 +11,39 @@ from app.config import settings
 from app.schemas import CalendarEvent, CalendarWatchResponse
 
 
-class GoogleCalendarClient:
+class CalendarWatchClient(Protocol):
+    async def watch_events(
+        self,
+        channel_id: str,
+        callback_url: str,
+        channel_token: str,
+        expiration_ms: int,
+    ) -> CalendarWatchResponse: ...
+
+    async def stop_watching(self, channel_id: str, resource_id: str) -> None: ...
+
+
+class CalendarSyncClient(Protocol):
+    async def sync_events(
+        self, sync_token: str | None
+    ) -> tuple[list[CalendarEvent], str]: ...
+
+
+class CalendarEventsClient(Protocol):
+    async def list_events(
+        self, time_min: datetime, time_max: datetime
+    ) -> list[CalendarEvent]: ...
+
+    async def close(self) -> None: ...
+
+
+class GoogleCalendarClientProtocol(
+    CalendarWatchClient, CalendarSyncClient, CalendarEventsClient, Protocol
+):
+    pass
+
+
+class GoogleCalendarClient(GoogleCalendarClientProtocol):
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self.client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(20, connect=10),
