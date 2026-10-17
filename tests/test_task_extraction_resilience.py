@@ -6,19 +6,25 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from openai import AsyncOpenAI
 
 from app import db
 from app.config import settings
-from app.integrations.task_extraction import extract_tasks
+from app.integrations.task_extraction import _extract_chunk_checkpointed, extract_tasks
 from app.schemas import TranscriptSegment
 
 
-def _response(content: str) -> SimpleNamespace:
+def _response(content: str, *, finish_reason: str | None = None) -> SimpleNamespace:
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content), finish_reason=finish_reason
+            )
+        ]
     )
 
 
@@ -45,6 +51,109 @@ class TaskExtractionResilienceTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         self.settings_patch.stop()
         self.temp_dir.cleanup()
+
+    async def test_truncated_json_response_is_split_and_retried(self) -> None:
+        segments: list[TranscriptSegment] = [
+            {
+                "id": "s1",
+                "timestamp_ms": 1000,
+                "duration_ms": 0,
+                "speaker_name": "Maya",
+                "speaker_uuid": None,
+                "text": "I'll add a regression test.",
+                "raw": {},
+            },
+            {
+                "id": "s2",
+                "timestamp_ms": 2000,
+                "duration_ms": 0,
+                "speaker_name": "Leo",
+                "speaker_uuid": None,
+                "text": "I'll document recovery steps.",
+                "raw": {},
+            },
+        ]
+
+        def extracted_task(summary: str, quote: str, timestamp_ms: int) -> str:
+            return json.dumps(
+                {
+                    "tasks": [
+                        {
+                            "summary": summary,
+                            "evidence_quote": quote,
+                            "timestamp_ms": timestamp_ms,
+                            "context_query": summary,
+                            "confidence": 0.95,
+                        }
+                    ]
+                }
+            )
+
+        client, create = _fake_client(
+            [
+                _response('{"tasks":[{"summary":"truncated'),
+                _response(
+                    extracted_task("Add regression test", segments[0]["text"], 1000)
+                ),
+                _response(
+                    extracted_task("Document recovery", segments[1]["text"], 2000)
+                ),
+            ]
+        )
+
+        result = await _extract_chunk_checkpointed(
+            cast(AsyncOpenAI, client),
+            segments,
+            bot_id=None,
+            transcript_hash=None,
+            item_key="0",
+        )
+
+        self.assertEqual(create.await_count, 3)
+        self.assertEqual(
+            [task.summary for task in result.tasks],
+            ["Add regression test", "Document recovery"],
+        )
+
+    async def test_completion_token_limit_splits_even_valid_json(self) -> None:
+        segments: list[TranscriptSegment] = [
+            {
+                "id": "s1",
+                "timestamp_ms": 1000,
+                "duration_ms": 0,
+                "speaker_name": "Maya",
+                "speaker_uuid": None,
+                "text": "I'll add a regression test.",
+                "raw": {},
+            },
+            {
+                "id": "s2",
+                "timestamp_ms": 2000,
+                "duration_ms": 0,
+                "speaker_name": "Leo",
+                "speaker_uuid": None,
+                "text": "I'll document recovery steps.",
+                "raw": {},
+            },
+        ]
+        client, create = _fake_client(
+            [
+                _response('{"tasks":[]}', finish_reason="length"),
+                _response('{"tasks":[]}'),
+                _response('{"tasks":[]}'),
+            ]
+        )
+
+        result = await _extract_chunk_checkpointed(
+            cast(AsyncOpenAI, client),
+            segments,
+            bot_id=None,
+            transcript_hash=None,
+            item_key="0",
+        )
+
+        self.assertEqual(create.await_count, 3)
+        self.assertEqual(result.tasks, [])
 
     async def test_completed_chunk_and_context_results_survive_interruption(
         self,

@@ -10,6 +10,7 @@ from typing import Literal, cast
 
 import httpx
 from openai import AsyncOpenAI
+from pydantic import ValidationError
 from openai.types.chat import ChatCompletionMessageParam
 
 from app import db
@@ -102,6 +103,10 @@ def _prompt_fits(messages: list[dict[str, str]], max_completion_tokens: int) -> 
 
 
 class PromptBudgetExceeded(RuntimeError):
+    pass
+
+
+class IncompleteTaskExtraction(RuntimeError):
     pass
 
 
@@ -806,8 +811,21 @@ async def _extract_chunk(
         messages=cast(Iterable[ChatCompletionMessageParam], messages),
         max_tokens=max_completion_tokens,
     )
-    content = response.choices[0].message.content or '{"tasks":[]}'
-    return TaskExtraction.model_validate_json(content)
+    choice = response.choices[0]
+    if getattr(choice, "finish_reason", None) == "length":
+        raise IncompleteTaskExtraction(
+            "Task extraction response reached the completion token limit"
+        )
+
+    content = choice.message.content or '{"tasks":[]}'
+    try:
+        return TaskExtraction.model_validate_json(content)
+    except ValidationError as exc:
+        if any(error.get("type") == "json_invalid" for error in exc.errors()):
+            raise IncompleteTaskExtraction(
+                "Task extraction response contained incomplete JSON"
+            ) from exc
+        raise
 
 
 def _split_chunk_for_compaction(
@@ -883,10 +901,14 @@ async def _extract_chunk_checkpointed(
         try:
             extracted = await _extract_chunk(client, chunk)
         except Exception as exc:
-            if not _is_prompt_limit_error(exc):
+            if not _is_prompt_limit_error(exc) and not isinstance(
+                exc, IncompleteTaskExtraction
+            ):
                 raise
             parts = _split_chunk_for_compaction(chunk)
             if parts is None:
+                if isinstance(exc, IncompleteTaskExtraction):
+                    raise
                 raise PromptBudgetExceeded(
                     "A single transcript segment cannot fit the model context"
                 ) from exc
