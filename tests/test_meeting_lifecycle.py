@@ -645,6 +645,7 @@ class AttendeeWebhookLeaveStateTests(unittest.TestCase):
             app_api_token="test-app-token",
             google_calendar_auto_join_enabled=False,
             meeting_auto_leave_enabled=False,
+            screenshare_capture_enabled=False,
         )
         self.app_settings_patch = patch("app.main.settings", self.app_settings)
         self.auth_settings_patch = patch(

@@ -38,6 +38,7 @@ from app.controllers.webhooks import (
 from app.controllers.webhooks import (
     router as webhooks_router,
 )
+from app.log_redaction import install_query_token_redaction
 from app.meeting_lifecycle import (
     run_meeting_leave_monitor,
     run_meeting_leave_watchdog,
@@ -53,6 +54,7 @@ from app.services.dashboard import (
 )
 
 logging.basicConfig(level=logging.INFO)
+install_query_token_redaction()
 logger = logging.getLogger("jira-bot")
 _BACKGROUND_TASK_RETRY_SECONDS = 5
 
