@@ -111,6 +111,31 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
 
+  # Serves the API's screen-share websocket over wss:// on the Compose network.
+  api-tls:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    volumes:
+      - ./tls-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs/api-tls.pem:/certs/api-tls.pem:ro
+      - ./certs/api-tls-key.pem:/certs/api-tls-key.pem:ro
+    networks:
+      - attendee_network
+    read_only: true
+    tmpfs:
+      - /data:rw,noexec,nosuid,size=16m
+      - /config:rw,noexec,nosuid,size=16m
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+    cap_drop: [ALL]
+    # The image's caddy binary carries this file capability and cannot exec without it.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+
   worker:
     build: .
     init: true
@@ -157,3 +182,8 @@ services:
 volumes:
   jira_bot_data:
   attendee_storage_data:
+
+configs:
+  # Public CAs plus the local CA that signs the api-tls certificate (scripts/dev.py).
+  attendee_ca_bundle:
+    file: ./certs/attendee-ca-bundle.pem

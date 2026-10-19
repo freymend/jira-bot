@@ -446,6 +446,7 @@ class ScreenShareBotConfigurationTests(unittest.IsolatedAsyncioTestCase):
             mlx_transcriber_api_key="transcriber-key",
             screenshare_capture_enabled=True,
             screenshare_websocket_token="t" * 40,
+            screenshare_websocket_base_url="",
             screenshare_resolution="720p",
         )
         response = MagicMock()
@@ -466,6 +467,34 @@ class ScreenShareBotConfigurationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(video["screenshare_resolution"], "720p")
         self.assertTrue(video["url"].startswith("wss://assistant.example/"))
         self.assertIn(configuration.screenshare_websocket_token, video["url"])
+        await client.close()
+
+    async def test_video_base_url_keeps_webhooks_on_compose_network(self) -> None:
+        configuration = replace(
+            settings,
+            attendee_api_key="attendee-key",
+            app_public_url="http://api:5005",
+            mlx_transcriber_api_key="transcriber-key",
+            screenshare_capture_enabled=True,
+            screenshare_websocket_token="t" * 40,
+            screenshare_websocket_base_url="https://api-tls:8443",
+        )
+        response = MagicMock()
+        response.json.return_value = {"id": "bot-local-tls"}
+        client = AttendeeClient()
+        post = AsyncMock(return_value=response)
+        client.client.post = post  # type: ignore[method-assign]
+        with patch("app.integrations.attendee.settings", configuration):
+            await client.create_bot("https://meet.google.com/abc-defg-hij")
+        assert post.await_args is not None
+        request_body = post.await_args.kwargs["json"]
+        self.assertEqual(
+            request_body["webhooks"][0]["url"], "http://api:5005/webhooks/attendee"
+        )
+        video = request_body["websocket_settings"]["per_participant_video"]
+        self.assertTrue(
+            video["url"].startswith("wss://api-tls:8443/webhooks/attendee/video?token=")
+        )
         await client.close()
 
     async def test_meeting_can_disable_globally_enabled_capture(self) -> None:
@@ -497,13 +526,16 @@ class ScreenShareBotConfigurationTests(unittest.IsolatedAsyncioTestCase):
             app_public_url="http://api:5005",
             screenshare_capture_enabled=True,
             screenshare_websocket_token="t" * 40,
+            screenshare_websocket_base_url="",
         )
         client = AttendeeClient()
         post = AsyncMock()
         client.client.post = post  # type: ignore[method-assign]
         with (
             patch("app.integrations.attendee.settings", configuration),
-            self.assertRaisesRegex(RuntimeError, "requires APP_PUBLIC_URL"),
+            self.assertRaisesRegex(
+                RuntimeError, "requires SCREENSHARE_WEBSOCKET_BASE_URL"
+            ),
         ):
             await client.create_bot("https://meet.google.com/abc-defg-hij")
         post.assert_not_awaited()

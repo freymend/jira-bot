@@ -28,6 +28,11 @@ services:
       - AWS_SECRET_ACCESS_KEY=attendee-local-development
       - AWS_ENDPOINT_URL=http://attendee-storage:9000
       - AWS_S3_ADDRESSING_STYLE=path
+      # Trust the local CA for the wss:// screen-share stream to api-tls.
+      - SSL_CERT_FILE=/etc/jira-bot-tls/ca-bundle.pem
+    configs:
+      - source: attendee_ca_bundle
+        target: /etc/jira-bot-tls/ca-bundle.pem
     depends_on:
       attendee-storage-init:
         condition: service_completed_successfully

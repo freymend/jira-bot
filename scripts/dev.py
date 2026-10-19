@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import shutil
 import signal
 import subprocess
@@ -12,11 +13,14 @@ from typing import TextIO
 from urllib.error import URLError
 from urllib.request import urlopen
 
+import certifi
 from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parents[1]
 ATTENDEE_ROOT = ROOT.parent / "attendee"
 STATE_ROOT = ROOT / ".dev-run"
+TLS_ROOT = ROOT / "certs"
+TLS_PROXY_HOSTNAME = "api-tls"
 STARTUP_TIMEOUT_SECONDS = 600
 
 
@@ -212,6 +216,62 @@ def _require_setup() -> None:
         raise RuntimeError("Set MLX_TRANSCRIBER_API_KEY in the project .env file.")
 
 
+def _openssl(openssl: str, *args: str | Path) -> None:
+    subprocess.run(
+        [openssl, *map(str, args)], check=True, capture_output=True, text=True
+    )
+
+
+def _ensure_local_tls() -> None:
+    """Create the local CA and proxy certificate for Attendee's wss:// video stream.
+
+    Attendee only streams video to wss:// URLs. The api-tls proxy serves the API's
+    video websocket with a certificate from this CA, and Attendee's worker trusts the
+    CA through a bundle that also keeps the public CAs. The CA key stays on the host.
+    """
+    ca_cert = TLS_ROOT / "local-ca.pem"
+    ca_key = TLS_ROOT / "local-ca-key.pem"
+    cert = TLS_ROOT / f"{TLS_PROXY_HOSTNAME}.pem"
+    key = TLS_ROOT / f"{TLS_PROXY_HOSTNAME}-key.pem"
+    if not all(path.exists() for path in (ca_cert, cert, key)):
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            raise RuntimeError("Required command is not on PATH: openssl")
+        TLS_ROOT.mkdir(mode=0o700, exist_ok=True)
+        ec_key = ("-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes")
+        _openssl(
+            openssl, "req", "-x509", *ec_key, "-keyout", ca_key, "-out", ca_cert,
+            "-days", "825", "-subj", "/CN=jira-bot local development CA",
+            "-addext", "basicConstraints=critical,CA:TRUE",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+        )  # fmt: skip
+        csr = TLS_ROOT / f"{TLS_PROXY_HOSTNAME}.csr"
+        extensions = TLS_ROOT / f"{TLS_PROXY_HOSTNAME}.ext"
+        extensions.write_text(
+            f"subjectAltName=DNS:{TLS_PROXY_HOSTNAME}\n"
+            "basicConstraints=critical,CA:FALSE\n"
+            "keyUsage=critical,digitalSignature\n"
+            "extendedKeyUsage=serverAuth\n"
+        )
+        try:
+            _openssl(
+                openssl, "req", *ec_key, "-keyout", key, "-out", csr,
+                "-subj", f"/CN={TLS_PROXY_HOSTNAME}",
+            )  # fmt: skip
+            _openssl(
+                openssl, "x509", "-req", "-in", csr, "-CA", ca_cert, "-CAkey", ca_key,
+                "-set_serial", f"0x{secrets.token_hex(16)}", "-days", "825",
+                "-extfile", extensions, "-out", cert,
+            )  # fmt: skip
+        finally:
+            csr.unlink(missing_ok=True)
+            extensions.unlink(missing_ok=True)
+    bundle = TLS_ROOT / "attendee-ca-bundle.pem"
+    bundle.write_text(
+        Path(certifi.where()).read_text().rstrip("\n") + "\n" + ca_cert.read_text()
+    )
+
+
 def _compose(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["docker", "compose", *args],
@@ -252,6 +312,7 @@ def up() -> None:
             ROOT,
             "http://127.0.0.1:8101/health",
         )
+        _ensure_local_tls()
         _compose("up", "--build", "-d")
         dashboard_port = _setting("LOCAL_DASHBOARD_PORT", "5006")
         _start_native_service(

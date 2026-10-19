@@ -58,6 +58,7 @@ class Settings:
     jira_priority_map: dict[str, str]
     screenshare_capture_enabled: bool
     screenshare_websocket_token: str
+    screenshare_websocket_base_url: str
     screenshare_resolution: str
     screenshare_sample_interval_seconds: int
     screenshare_retention_hours: int
@@ -239,6 +240,11 @@ class Settings:
             jira_priority_map=_json_mapping("JIRA_PRIORITY_MAP"),
             screenshare_capture_enabled=screenshare_capture_enabled,
             screenshare_websocket_token=screenshare_websocket_token,
+            screenshare_websocket_base_url=os.getenv(
+                "SCREENSHARE_WEBSOCKET_BASE_URL", ""
+            )
+            .strip()
+            .rstrip("/"),
             screenshare_resolution=screenshare_resolution,
             screenshare_sample_interval_seconds=screenshare_sample_interval_seconds,
             screenshare_retention_hours=screenshare_retention_hours,

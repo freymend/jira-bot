@@ -83,10 +83,18 @@ class AttendeeClient(AttendeeClientProtocol):
                 "APP_PUBLIC_URL must be a public HTTPS URL or http://api:5005 "
                 "on the local Compose network"
             )
-        if capture_screen_share and not is_public_https_url:
+        # Video can use its own HTTPS endpoint (such as the local TLS proxy) so that
+        # webhooks can stay on the internal Compose URL.
+        video_base_url = urlsplit(
+            settings.screenshare_websocket_base_url or settings.app_public_url
+        )
+        if capture_screen_share and not (
+            video_base_url.scheme == "https" and video_base_url.hostname is not None
+        ):
             raise RuntimeError(
-                "Screen-share capture requires APP_PUBLIC_URL to be a public "
-                "HTTPS URL because Attendee requires a wss:// video endpoint"
+                "Screen-share capture requires SCREENSHARE_WEBSOCKET_BASE_URL or "
+                "APP_PUBLIC_URL to be an HTTPS URL because Attendee requires a "
+                "wss:// video endpoint"
             )
         if not settings.mlx_transcriber_api_key:
             raise RuntimeError("MLX_TRANSCRIBER_API_KEY is not configured")
@@ -117,11 +125,13 @@ class AttendeeClient(AttendeeClientProtocol):
             ],
         }
         if capture_screen_share:
-            websocket_path = callback_url.path.rstrip("/") + "/webhooks/attendee/video"
+            websocket_path = (
+                video_base_url.path.rstrip("/") + "/webhooks/attendee/video"
+            )
             websocket_url = urlunsplit(
                 (
                     "wss",
-                    callback_url.netloc,
+                    video_base_url.netloc,
                     websocket_path,
                     urlencode({"token": settings.screenshare_websocket_token}),
                     "",

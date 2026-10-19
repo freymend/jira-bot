@@ -1,0 +1,18 @@
+# TLS endpoint for Attendee's screen-share websocket; Attendee only streams video to
+# wss:// URLs. Webhooks stay on http://api:5005, so only the video path is proxied.
+# scripts/dev.py creates the certificate from the local CA in certs/.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+https://api-tls:8443 {
+	tls /certs/api-tls.pem /certs/api-tls-key.pem
+	handle /webhooks/attendee/video {
+		reverse_proxy api:5005
+	}
+	handle {
+		respond 404
+	}
+}

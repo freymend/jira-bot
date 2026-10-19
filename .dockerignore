@@ -12,3 +12,4 @@ data
 *.sqlite3
 local-transcriber/*
 !local-transcriber/pyproject.toml
+certs
